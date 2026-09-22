@@ -1,0 +1,4 @@
+# any markdown files
+markdownfiles/
+# build files
+build/

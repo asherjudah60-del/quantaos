@@ -1,0 +1,14 @@
+quanta_arch_halt
+quanta_arch_read_cr3
+quanta_arch_enter_user
+quanta_arch_configure_syscalls
+quanta_arch_initialize
+quanta_arch_int80_stub
+quanta_arch_reload_gdt
+quanta_arch_syscall_dispatch
+quanta_arch_write_marker
+quanta_arch_syscall_entry
+quanta_arch_console_clear
+quanta_arch_console_initialize
+quanta_arch_console_read_char
+quanta_arch_read_rtc

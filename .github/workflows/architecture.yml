@@ -1,0 +1,21 @@
+name: Architecture
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  boundaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install freestanding build and emulator tools
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm qemu-system-x86
+      - name: Check architectural boundaries
+        run: make check test-architecture test-host abi
+      - name: Build isolated privileged artifacts
+        run: make all
+      - name: Validate kernel public exports
+        run: python3 scripts/check_exports.py build/kernel/quanta.elf kernel/exports.txt
+      - name: Boot smoke image in QEMU
+        run: make qemu-smoke
