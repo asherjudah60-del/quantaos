@@ -62,4 +62,5 @@ int quanta_qfs_list(const char *path, char *output, uint32_t capacity);
 int quanta_qfs_stat(const char *path, struct quanta_file_stat *stat);
 int quanta_qfs2_stat(const char *path, struct quanta_file_stat *stat);
 int quanta_qfs2_mkdir(const char *path);
+int quanta_qfs2_create(const char *path);
 #endif

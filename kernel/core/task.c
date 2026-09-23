@@ -9,7 +9,7 @@
 #include <quanta/task.h>
 #include <quanta/vfs.h>
 
-#define TASK_MAX_CODE_PAGES 8U
+#define TASK_MAX_CODE_PAGES 16U
 #define USER_CODE_BASE 0x400000U
 #define USER_STACK_BASE 0x7fffffffd000ULL
 #define USER_STACK_END 0x7ffffffff000ULL
@@ -65,8 +65,9 @@ static int user_range_valid(const struct quanta_task *task, uint64_t address,
     if (address > ~0ULL - length) return 0;
     end = address + length;
     if (address >= USER_STACK_BASE && end <= USER_STACK_END) return 1;
-    if (writable) return 0;
-    return address >= USER_CODE_BASE && end <= code_end;
+    if (address >= USER_CODE_BASE && end <= code_end) return 1;
+    (void)writable;
+    return 0;
 }
 
 static struct quanta_task_file *file_for_handle(struct quanta_task *task,
@@ -190,13 +191,25 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
         struct quanta_file_stat stat;
         uint32_t slot;
         uint64_t *result = (uint64_t *)(uintptr_t)payload;
+        const char *path = (const char *)(uintptr_t)message;
         if (result == NULL ||
             !user_range_valid(task, message, QUANTA_PATH_MAX, 0) ||
             !user_range_valid(task, payload, sizeof(*result), 1) ||
-            mount->provider->stat((const char *)(uintptr_t)message, &stat) != 0 ||
             (length & ~(QUANTA_OPEN_READ | QUANTA_OPEN_WRITE | QUANTA_OPEN_CREATE |
-                QUANTA_OPEN_TRUNCATE | QUANTA_OPEN_DIRECTORY)) != 0U ||
-            ((length & QUANTA_OPEN_DIRECTORY) != 0U && stat.type != QUANTA_FILE_DIRECTORY)) {
+                QUANTA_OPEN_TRUNCATE | QUANTA_OPEN_DIRECTORY)) != 0U) {
+            return QUANTA_STATUS_INVALID;
+        }
+        if (mount->provider->stat(path, &stat) != 0) {
+            if ((length & QUANTA_OPEN_CREATE) == 0U ||
+                mount->filesystem_kind != QUANTA_FILESYSTEM_QFS2 ||
+                (mount->flags & QUANTA_MOUNT_READ_ONLY) != 0U ||
+                (length & QUANTA_OPEN_DIRECTORY) != 0U ||
+                quanta_qfs2_create(path) != 0 ||
+                mount->provider->stat(path, &stat) != 0) {
+                return QUANTA_STATUS_INVALID;
+            }
+        }
+        if ((length & QUANTA_OPEN_DIRECTORY) != 0U && stat.type != QUANTA_FILE_DIRECTORY) {
             return QUANTA_STATUS_INVALID;
         }
         for (slot = 0; slot < TASK_MAX_FILE_HANDLES; ++slot) {
@@ -276,8 +289,9 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
         quanta_arch_shutdown();
     }
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_RTC_READ) {
-        uint8_t *clock = (uint8_t *)(uintptr_t)payload;
-        if (clock == NULL || length < 6U) {
+        uint8_t clock[6];
+        uint8_t *output = (uint8_t *)(uintptr_t)payload;
+        if (output == NULL || length < 6U) {
             quanta_arch_write_marker("QUANTA_RTC_INVALID_ARGS\n");
             return QUANTA_STATUS_INVALID;
         }
@@ -287,24 +301,35 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
         }
         quanta_arch_write_marker("QUANTA_RTC_READY\n");
         quanta_arch_read_rtc(&clock[0], &clock[1], &clock[2], &clock[3], &clock[4], &clock[5]);
+        for (index = 0; index < 6U; ++index) output[index] = clock[index];
         quanta_arch_write_marker("QUANTA_RTC_DONE\n");
         return QUANTA_STATUS_OK;
     }
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_AUTH_VERIFY) {
         uint32_t *temporary = (uint32_t *)(uintptr_t)payload;
-        if (length == 0U || length > 64U || temporary == 0 ||
-            !user_range_valid(task, message, length, 0) ||
+        char password[65];
+        uint32_t flag = 0;
+        if (length > 64U || temporary == 0 ||
+            (length != 0U && !user_range_valid(task, message, length, 0)) ||
             !user_range_valid(task, payload, sizeof(*temporary), 1)) return QUANTA_STATUS_INVALID;
-        if (quanta_account_verify((const char *)(uintptr_t)message, length, temporary) != 0) {
+        for (index = 0; index < length; ++index)
+            password[index] = ((const char *)(uintptr_t)message)[index];
+        password[length] = 0;
+        if (quanta_account_verify(password, length, &flag) != 0) {
             return QUANTA_STATUS_DENIED;
         }
+        *temporary = flag;
         task->authenticated = 1U;
         return QUANTA_STATUS_OK;
     }
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_AUTH_CHANGE) {
+        char password[65];
         if (!task->authenticated || length == 0U || length > 64U ||
             !user_range_valid(task, message, length, 0)) return QUANTA_STATUS_DENIED;
-        return quanta_account_change((const char *)(uintptr_t)message, length) == 0
+        for (index = 0; index < length; ++index)
+            password[index] = ((const char *)(uintptr_t)message)[index];
+        password[length] = 0;
+        return quanta_account_change(password, length) == 0
             ? QUANTA_STATUS_OK : QUANTA_STATUS_STATE;
     }
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_SYSTEM_INFO) {

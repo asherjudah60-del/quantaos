@@ -199,3 +199,106 @@ def parse_volume(image: bytes, start_lba: int = SUPERBLOCK_LBA) -> dict[str, byt
             _, _, _, _, _, size, first, _, _, _, _ = values
             result[path] = image[first * SECTOR:first * SECTOR + size]
     return result
+
+
+def _split_path(path: str) -> tuple[str, str]:
+    if not path.startswith("/") or path == "/":
+        raise ValueError("invalid mkdir path")
+    trimmed = path.rstrip("/")
+    parent, name = trimmed.rsplit("/", 1)
+    if not name:
+        raise ValueError("invalid mkdir path")
+    return parent or "/", name
+
+
+def _inode_table(image: bytearray, start_lba: int = SUPERBLOCK_LBA):
+    validate_metadata(image[start_lba * SECTOR:])
+    fields = SUPER.unpack_from(image, start_lba * SECTOR)
+    _, _, _, _, _, inode_lba, inode_sectors, entry_lba, entry_sectors, _, _, _ = fields
+    inode_off = inode_lba * SECTOR
+    entry_off = entry_lba * SECTOR
+    inode_data = image[inode_off:inode_off + inode_sectors * SECTOR]
+    entry_data = image[entry_off:entry_off + entry_sectors * SECTOR]
+    return fields, inode_off, inode_data, entry_off, entry_data
+
+
+def _paths_from_image(image: bytes, start_lba: int = SUPERBLOCK_LBA) -> dict[int, str]:
+    fields, _, inode_data, _, entry_data = _inode_table(bytearray(image), start_lba)
+    del fields
+    inodes = {INODE.unpack_from(inode_data, offset)[0]: INODE.unpack_from(inode_data, offset)
+              for offset in range(0, len(inode_data) - INODE.size + 1, INODE.size)
+              if INODE.unpack_from(inode_data, offset)[0] != 0}
+    paths = {ROOT_INODE: "/"}
+    pending = [DENTRY.unpack_from(entry_data, offset)
+               for offset in range(0, len(entry_data) - DENTRY.size + 1, DENTRY.size)
+               if DENTRY.unpack_from(entry_data, offset)[3] != 0]
+    while pending:
+        before = len(pending)
+        remaining = []
+        for entry in pending:
+            if entry[0] not in paths:
+                remaining.append(entry)
+                continue
+            paths[entry[1]] = paths[entry[0]].rstrip("/") + "/" + entry[4][:entry[3]].decode("ascii")
+        pending = remaining
+        if len(pending) == before:
+            raise ValueError("orphan QFS v2 directory entry")
+    return paths, inodes
+
+
+def list_dir(image: bytes, path: str, start_lba: int = SUPERBLOCK_LBA) -> list[str]:
+    paths, inodes = _paths_from_image(image, start_lba)
+    inode_for = {value: key for key, value in paths.items()}
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    number = inode_for.get(path)
+    if number is None or inodes[number][1] != TYPE_DIRECTORY:
+        raise FileNotFoundError(path)
+    names = []
+    for child, full in paths.items():
+        if child == number:
+            continue
+        parent = full.rsplit("/", 1)[0] or "/"
+        if parent == path:
+            names.append(full.rsplit("/", 1)[1])
+    return names
+
+
+def create_node(image: bytearray, path: str, kind: int = TYPE_DIRECTORY,
+                start_lba: int = SUPERBLOCK_LBA) -> None:
+    parent, name = _split_path(path)
+    paths, inodes = _paths_from_image(bytes(image), start_lba)
+    inode_for = {value: key for key, value in paths.items()}
+    if parent not in inode_for or inodes[inode_for[parent]][1] != TYPE_DIRECTORY:
+        raise FileNotFoundError(parent)
+    if path.rstrip("/") in inode_for:
+        raise FileExistsError(path)
+    fields, inode_off, inode_data, entry_off, entry_data = _inode_table(image, start_lba)
+    inode_count = len(inode_data) // INODE.size
+    new_inode = 0
+    for number in range(2, inode_count + 1):
+        offset = (number - 1) * INODE.size
+        current = INODE.unpack_from(inode_data, offset)[0]
+        if current == 0:
+            new_inode = number
+            break
+    if new_inode == 0:
+        raise OSError("no free inode")
+    slot = None
+    for index in range(len(entry_data) // DENTRY.size):
+        offset = index * DENTRY.size
+        if DENTRY.unpack_from(entry_data, offset)[3] == 0:
+            slot = offset
+            break
+    if slot is None:
+        raise OSError("no free directory entry")
+    encoded_inode = Inode(new_inode, kind, MODE_DIRECTORY if kind == TYPE_DIRECTORY else MODE_FILE).encode()
+    encoded_entry = DirectoryEntry(inode_for[parent], new_inode, name, kind).encode()
+    inode_pos = inode_off + (new_inode - 1) * INODE.size
+    image[inode_pos:inode_pos + INODE.size] = encoded_inode
+    image[entry_off + slot:entry_off + slot + DENTRY.size] = encoded_entry
+    del fields
+
+
+def mkdir(image: bytearray, path: str, start_lba: int = SUPERBLOCK_LBA) -> None:
+    create_node(image, path, TYPE_DIRECTORY, start_lba)

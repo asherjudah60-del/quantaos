@@ -40,6 +40,7 @@ quanta_qfs2_read
 quanta_qfs2_list
 quanta_qfs2_stat
 quanta_qfs2_mkdir
+quanta_qfs2_create
 quanta_qfs_stat
 quanta_storage_boot_device
 quanta_vfs_probe_boot

@@ -12,7 +12,7 @@ USER_UTILITIES := echo true false uname mkdir date pwd cat
 USER_UTILITY_OBJECTS := $(USER_UTILITIES:%=$(BUILD)/userspace/bin/%.o)
 USER_UTILITY_ELFS := $(USER_UTILITIES:%=$(BUILD)/userspace/bin/%.elf)
 
-.PHONY: all bootloader kernel uefi-loader user-binaries live-iso test-user-elf test-image-qfs test-qfs2 test-exfat test-gpt test-drivers test-user-lib check test-architecture test-host abi qemu-smoke qemu-iso-smoke qemu-uefi-smoke qemu-run qemu-window clean
+.PHONY: all bootloader kernel uefi-loader user-binaries live-iso test-user-elf test-image-qfs test-qfs2 test-exfat test-gpt test-drivers test-user-lib check test-architecture test-host abi qemu-smoke qemu-session-smoke qemu-iso-smoke qemu-uefi-smoke qemu-run qemu-window clean
 
 all: bootloader kernel
 
@@ -131,6 +131,8 @@ test-architecture:
 
 test-host:
 	$(PYTHON) tests/test_elf64.py
+	$(PYTHON) tests/test_shell_utilities.py
+	$(PYTHON) tests/test_qfs2.py
 
 abi:
 	@mkdir -p $(BUILD)/tests
@@ -138,6 +140,9 @@ abi:
 
 qemu-smoke: $(BUILD)/quantaos.img
 	$(PYTHON) scripts/qemu_smoke.py $< --marker QUANTA_BOOT_STAGE1_READY --marker QUANTA_BOOT_STAGE2_READY --marker QUANTA_LONG_MODE_READY --marker QUANTA_KERNEL_READY --marker QUANTA_LOGIN_READY
+
+qemu-session-smoke: $(BUILD)/quantaos.img
+	$(PYTHON) scripts/qemu_session_smoke.py $<
 
 qemu-iso-smoke: $(BUILD)/quantaos.iso
 	$(PYTHON) scripts/qemu_smoke.py $< --cdrom --marker QUANTA_BOOT_STAGE1_READY --marker QUANTA_BOOT_STAGE2_READY --marker QUANTA_LONG_MODE_READY --marker QUANTA_KERNEL_READY --marker QUANTA_LOGIN_READY

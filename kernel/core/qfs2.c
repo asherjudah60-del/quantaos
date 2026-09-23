@@ -54,15 +54,15 @@ static int load_super(struct qfs2_superblock *super) {
         super->checksum != crc32(sector, 40U)) return -1;
     return 0;
 }
-static int read_metadata(const struct qfs2_superblock *super, uint32_t offset,
+static int read_metadata(const struct qfs2_superblock *super, uint64_t offset,
     void *output, uint32_t length) {
     uint8_t *out = output;
+    uint64_t limit = (uint64_t)super->total_sectors * QFS2_SECTOR;
     uint32_t sector_number, byte, count;
-    if (offset > super->total_sectors * QFS2_SECTOR ||
-        length > super->total_sectors * QFS2_SECTOR - offset) return -1;
+    if (offset > limit || length > limit - offset) return -1;
     while (length) {
-        sector_number = offset / QFS2_SECTOR;
-        byte = offset % QFS2_SECTOR;
+        sector_number = (uint32_t)(offset / QFS2_SECTOR);
+        byte = (uint32_t)(offset % QFS2_SECTOR);
         if (read_sector(sector_number) != 0) return -1;
         count = QFS2_SECTOR - byte;
         if (count > length) count = length;
@@ -71,15 +71,15 @@ static int read_metadata(const struct qfs2_superblock *super, uint32_t offset,
     }
     return 0;
 }
-static int write_metadata(const struct qfs2_superblock *super, uint32_t offset,
+static int write_metadata(const struct qfs2_superblock *super, uint64_t offset,
     const void *input, uint32_t length) {
     const uint8_t *in = input;
+    uint64_t limit = (uint64_t)super->total_sectors * QFS2_SECTOR;
     uint32_t sector_number, byte, count;
-    if (offset > super->total_sectors * QFS2_SECTOR ||
-        length > super->total_sectors * QFS2_SECTOR - offset) return -1;
+    if (offset > limit || length > limit - offset) return -1;
     while (length) {
-        sector_number = offset / QFS2_SECTOR;
-        byte = offset % QFS2_SECTOR;
+        sector_number = (uint32_t)(offset / QFS2_SECTOR);
+        byte = (uint32_t)(offset % QFS2_SECTOR);
         if (read_sector(sector_number) != 0) return -1;
         count = QFS2_SECTOR - byte;
         if (count > length) count = length;
@@ -95,7 +95,15 @@ static int read_inode(const struct qfs2_superblock *super, uint64_t number,
     if (number == 0U || number > ((uint64_t)super->inode_sectors * QFS2_SECTOR) /
         sizeof(*inode)) return -1;
     offset = (uint64_t)super->inode_lba * QFS2_SECTOR + (number - 1U) * sizeof(*inode);
-    return read_metadata(super, (uint32_t)offset, inode, sizeof(*inode));
+    return read_metadata(super, offset, inode, sizeof(*inode));
+}
+static int write_inode(const struct qfs2_superblock *super, uint64_t number,
+    const struct qfs2_inode *inode) {
+    uint64_t offset;
+    if (number == 0U || number > ((uint64_t)super->inode_sectors * QFS2_SECTOR) /
+        sizeof(*inode)) return -1;
+    offset = (uint64_t)super->inode_lba * QFS2_SECTOR + (number - 1U) * sizeof(*inode);
+    return write_metadata(super, offset, inode, sizeof(*inode));
 }
 static int name_equal(const char *left, uint32_t left_length, const char *right) {
     uint32_t index = 0;
@@ -108,8 +116,10 @@ static int find_child(const struct qfs2_superblock *super, uint64_t parent,
     uint32_t count = (super->entry_sectors * QFS2_SECTOR) / sizeof(entry), index;
     uint32_t offset = super->entry_lba * QFS2_SECTOR;
     for (index = 0; index < count; ++index) {
-        if (read_metadata(super, offset + index * sizeof(entry), &entry, sizeof(entry)) != 0) return -1;
-        if (entry.parent == parent && entry.name_length <= sizeof(entry.name) &&
+        if (read_metadata(super, (uint64_t)offset + (uint64_t)index * sizeof(entry),
+            &entry, sizeof(entry)) != 0) return -1;
+        if (entry.parent == parent && entry.name_length > 0U &&
+            entry.name_length <= sizeof(entry.name) &&
             name_equal(entry.name, entry.name_length, name)) {
             *result = entry.inode; return 0;
         }
@@ -142,8 +152,9 @@ int quanta_qfs2_read(const char *path, char *output, uint32_t capacity) {
     uint32_t copied = 0, count;
     if (output == 0 || capacity == 0U || load_super(&super) != 0 ||
         find_path(&super, path, &number) != 0 || read_inode(&super, number, &inode) != 0 ||
-        inode.kind != QFS2_FILE || inode.size >= capacity || inode.sectors == 0U ||
-        inode.first_sector < super.entry_lba ||
+        inode.kind != QFS2_FILE || inode.size >= capacity) return -1;
+    if (inode.size == 0U) { output[0] = 0; return 0; }
+    if (inode.sectors == 0U || inode.first_sector < super.entry_lba ||
         inode.first_sector + inode.sectors > super.total_sectors) return -1;
     while (copied < inode.size) {
         if (read_sector(inode.first_sector + copied / QFS2_SECTOR) != 0) return -1;
@@ -169,7 +180,10 @@ int quanta_qfs2_list(const char *path, char *output, uint32_t capacity) {
         copy_bytes(output + used, entry.name, entry.name_length); used += entry.name_length;
         output[used++] = ' '; output[used] = 0;
     }
-    if (used == 0U) return -1;
+    if (used == 0U) {
+        output[0] = 0;
+        return 0;
+    }
     output[used - 1U] = '\n'; output[used] = 0;
     return (int)used;
 }
@@ -188,7 +202,12 @@ static int split_path(const char *path, char *parent, char *name) {
     uint32_t length = 0, cut = 0, index;
     if (path == 0 || path[0] != '/') return -1;
     while (path[length]) { if (path[length] == '/') cut = length; ++length; }
-    if (path[length - 1U] == '/' || path[cut + 1U] == 0 ||
+    while (length > 1U && path[length - 1U] == '/') --length;
+    while (cut > 0U && cut >= length) {
+        --cut;
+        while (cut > 0U && path[cut] != '/') --cut;
+    }
+    if (length <= 1U || path[cut + 1U] == 0 ||
         length - cut - 1U >= 49U || cut >= 96U) return -1;
     if (cut == 0U) {
         parent[0] = '/';
@@ -202,54 +221,68 @@ static int split_path(const char *path, char *parent, char *name) {
     return 0;
 }
 
-int quanta_qfs2_mkdir(const char *path) {
+static int create_node(const char *path, uint32_t kind) {
     struct qfs2_superblock super; struct qfs2_inode inode; struct qfs2_dentry entry;
-    char parent[96], name[49]; uint64_t parent_inode, new_inode; uint32_t index, count, offset;
+    char parent[96], name[49]; uint64_t parent_inode, new_inode = 0, check;
+    uint32_t index, count, name_length = 0; uint64_t offset;
     if (load_super(&super) != 0) { quanta_arch_write_marker("QUANTA_MKDIR_SUPER_FAILED\n"); return -1; }
     if (split_path(path, parent, name) != 0) { quanta_arch_write_marker("QUANTA_MKDIR_PATH_FAILED\n"); return -1; }
-    if (
-        find_path(&super, parent, &parent_inode) != 0 ||
-        read_inode(&super, parent_inode, &inode) != 0 || inode.kind != QFS2_DIRECTORY ||
-        find_child(&super, parent_inode, name, &new_inode) == 0) { quanta_arch_write_marker("QUANTA_MKDIR_PARENT_FAILED\n"); return -1; }
-    count = (super.inode_sectors * QFS2_SECTOR) / sizeof(inode);
-    for (index = 1; index < count; ++index) {
-        if (read_inode(&super, index + 1U, &inode) != 0) { quanta_arch_write_marker("QUANTA_MKDIR_INODE_READ_FAILED\n"); return -1; }
-        if (inode.inode == 0U) { new_inode = index + 1U; break; }
+    if (find_path(&super, parent, &parent_inode) != 0 ||
+        read_inode(&super, parent_inode, &inode) != 0 || inode.kind != QFS2_DIRECTORY) {
+        quanta_arch_write_marker("QUANTA_MKDIR_PARENT_FAILED\n"); return -1;
     }
-    if (index == count) { quanta_arch_write_marker("QUANTA_MKDIR_NO_INODE\n"); return -1; }
-    count = (super.entry_sectors * QFS2_SECTOR) / sizeof(entry);
-    offset = super.entry_lba * QFS2_SECTOR;
+    if (find_child(&super, parent_inode, name, &check) == 0) {
+        quanta_arch_write_marker("QUANTA_MKDIR_PARENT_FAILED\n"); return -1;
+    }
+    count = (uint32_t)(((uint64_t)super.inode_sectors * QFS2_SECTOR) / sizeof(inode));
+    for (index = 2; index <= count; ++index) {
+        if (read_inode(&super, index, &inode) != 0) {
+            quanta_arch_write_marker("QUANTA_MKDIR_INODE_READ_FAILED\n"); return -1;
+        }
+        if (inode.inode == 0U) { new_inode = index; break; }
+    }
+    if (new_inode == 0U) { quanta_arch_write_marker("QUANTA_MKDIR_NO_INODE\n"); return -1; }
+    count = (uint32_t)(((uint64_t)super.entry_sectors * QFS2_SECTOR) / sizeof(entry));
+    offset = (uint64_t)super.entry_lba * QFS2_SECTOR;
     for (index = 0; index < count; ++index) {
-        if (read_metadata(&super, offset + index * sizeof(entry), &entry, sizeof(entry)) != 0) { quanta_arch_write_marker("QUANTA_MKDIR_ENTRY_READ_FAILED\n"); return -1; }
+        if (read_metadata(&super, offset + (uint64_t)index * sizeof(entry), &entry,
+            sizeof(entry)) != 0) {
+            quanta_arch_write_marker("QUANTA_MKDIR_ENTRY_READ_FAILED\n"); return -1;
+        }
         if (entry.name_length == 0U) break;
     }
     if (index == count) { quanta_arch_write_marker("QUANTA_MKDIR_NO_ENTRY\n"); return -1; }
-    inode.inode = new_inode; inode.kind = QFS2_DIRECTORY; inode.mode = 0755U;
+    while (name[name_length]) ++name_length;
+    inode.inode = new_inode;
+    inode.kind = kind;
+    inode.mode = kind == QFS2_DIRECTORY ? 0755U : 0644U;
     inode.uid = 1000U; inode.gid = 1000U; inode.size = 0U; inode.first_sector = 0U;
     inode.sectors = 0U; inode.generation = 1U; inode.reserved = 0U; inode.flags = 0U;
-    if (write_metadata(&super, super.inode_lba * QFS2_SECTOR + (uint32_t)(new_inode - 1U) * sizeof(inode), &inode, sizeof(inode)) != 0) { quanta_arch_write_marker("QUANTA_MKDIR_INODE_WRITE_FAILED\n"); return -1; }
-    entry.parent = parent_inode; entry.inode = new_inode; entry.kind = QFS2_DIRECTORY;
-    entry.name_length = 0U; while (name[entry.name_length]) { entry.name[entry.name_length] = name[entry.name_length]; ++entry.name_length; }
-    while (entry.name_length < sizeof(entry.name)) entry.name[entry.name_length++] = 0;
-    entry.name_length = 0U; while (name[entry.name_length]) ++entry.name_length;
-    if (write_metadata(&super, offset + index * sizeof(entry), &entry, sizeof(entry)) != 0) {
-        inode.inode = 0U;
-        inode.kind = 0U;
-        inode.mode = 0U;
-        inode.uid = 0U;
-        inode.gid = 0U;
-        inode.size = 0U;
-        inode.first_sector = 0U;
-        inode.sectors = 0U;
-        inode.generation = 0U;
-        inode.reserved = 0U;
-        inode.flags = 0U;
-        write_metadata(&super, super.inode_lba * QFS2_SECTOR +
-            (uint32_t)(new_inode - 1U) * sizeof(inode), &inode, sizeof(inode));
+    if (write_inode(&super, new_inode, &inode) != 0) {
+        quanta_arch_write_marker("QUANTA_MKDIR_INODE_WRITE_FAILED\n"); return -1;
+    }
+    entry.parent = parent_inode; entry.inode = new_inode; entry.kind = (uint8_t)kind;
+    for (count = 0; count < sizeof(entry.name); ++count) entry.name[count] = 0;
+    copy_bytes(entry.name, name, name_length);
+    entry.name_length = (uint8_t)name_length;
+    if (write_metadata(&super, offset + (uint64_t)index * sizeof(entry), &entry,
+        sizeof(entry)) != 0) {
+        inode.inode = 0U; inode.kind = 0U; inode.mode = 0U; inode.uid = 0U;
+        inode.gid = 0U; inode.size = 0U; inode.first_sector = 0U; inode.sectors = 0U;
+        inode.generation = 0U; inode.reserved = 0U; inode.flags = 0U;
+        write_inode(&super, new_inode, &inode);
+        return -1;
+    }
+    if (read_inode(&super, new_inode, &inode) != 0 || inode.inode != new_inode ||
+        inode.kind != kind || find_child(&super, parent_inode, name, &check) != 0 ||
+        check != new_inode) {
+        quanta_arch_write_marker("QUANTA_MKDIR_VERIFY_FAILED\n");
         return -1;
     }
     return 0;
 }
+int quanta_qfs2_mkdir(const char *path) { return create_node(path, QFS2_DIRECTORY); }
+int quanta_qfs2_create(const char *path) { return create_node(path, QFS2_FILE); }
 static const struct quanta_fs_provider qfs2_provider = {
     "qfs2", quanta_qfs2_read, quanta_qfs2_list, quanta_qfs2_stat
 };

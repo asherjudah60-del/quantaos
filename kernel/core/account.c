@@ -45,7 +45,7 @@ static int record_valid(const uint8_t *record) {
 }
 int quanta_account_verify(const char *password, uint64_t length, uint32_t *temporary) {
     uint8_t first[ACCOUNT_SIZE], second[ACCOUNT_SIZE], digest[32], input[80]; uint8_t *record; uint64_t generation, other_generation; uint32_t i;
-    if (password == 0 || temporary == 0 || length == 0 || length > 64U) return -1;
+    if (password == 0 || temporary == 0 || length > 64U) return -1;
     if (quanta_arch_disk_read(ACCOUNT_LBA, first) != 0 || quanta_arch_disk_read(ACCOUNT_LBA + 1U, second) != 0) return -1;
     record = first; generation = 0; other_generation = 0;
     if (first[0]=='Q' && first[1]=='A' && first[2]=='C' && first[3]=='C' && first[4]=='O' && first[5]=='U' && first[6]=='N' && first[7]=='T') generation = *(uint64_t *)(first+12);

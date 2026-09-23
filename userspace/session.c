@@ -64,17 +64,6 @@ static int equal(const char *left, const char *right) {
     return *left == *right;
 }
 
-static int prefix(const char *text, const char *start) {
-    while (*start && *text == *start) { ++text; ++start; }
-    return *start == 0;
-}
-
-static const char *argument(const char *line, const char *name) {
-    uint64_t index = 0;
-    while (name[index] && line[index] == name[index]) ++index;
-    return name[index] == 0 && (line[index] == 0 || line[index] == ' ') ? line + index : 0;
-}
-
 static char logged_in_user[32] = "quanta";
 static char cwd[PATH_SIZE] = "C:/home/quanta";
 
@@ -99,31 +88,29 @@ static int system_info(struct quanta_system_info *info) {
 
 static int path_resolve(const char *input, char *output) {
     char parts[8][24]; char normalized[PATH_SIZE]; uint32_t count = 0, length = 0, index = 0, start;
+    const char *base;
+    if (input == 0) return -1;
+    while (*input == ' ') ++input;
+    if ((input[0] == 'C' || input[0] == 'c') && input[1] == ':') input += 2;
     if (equal(input, ".") || input[0] == 0) {
-        uint32_t cwd_length = 0;
-        const char *base = cwd;
+        base = cwd;
         if (base[0] == 'C' && base[1] == ':') base += 2;
-        while (base[cwd_length] && cwd_length + 1U < PATH_SIZE) {
-            output[cwd_length] = base[cwd_length];
-            ++cwd_length;
+        while (base[length] && length + 1U < PATH_SIZE) {
+            output[length] = base[length];
+            ++length;
         }
-        output[cwd_length] = 0;
-        return 0;
+        output[length] = 0;
+        return output[0] == '/' ? 0 : -1;
     }
-    if ((input[0] == 'C' || input[0] == 'c') && input[1] == ':') {
-        input += 2;
-        while (*input == '/' || *input == '\\') ++input;
-    }
-    if (input[0] == 0) input = ".";
     for (index = 0; input[index] && index + 1U < PATH_SIZE; ++index)
         normalized[index] = input[index] == '\\' ? '/' : input[index];
     normalized[index] = 0;
     input = normalized;
     if (input[0] != '/') {
-        const char *base = cwd;
+        base = cwd;
         if (base[0] == 'C' && base[1] == ':') base += 2;
         for (index = 0; base[index] && length + 1U < PATH_SIZE; ++index) output[length++] = base[index];
-        if (length > 1U && output[length - 1U] != '/') output[length++] = '/';
+        if (length == 0U || output[length - 1U] != '/') output[length++] = '/';
     }
     for (index = 0; input[index] && length + 1U < PATH_SIZE; ++index) output[length++] = input[index];
     output[length] = 0;
@@ -141,9 +128,34 @@ static int path_resolve(const char *input, char *output) {
         parts[count][index] = 0; ++count; output[length] = '/';
     }
     length = 0; output[length++] = '/';
-    for (index = 0; index < count; ++index) { uint32_t part = 0; while (parts[index][part]) output[length++] = parts[index][part++]; if (index + 1U < count) output[length++] = '/'; }
+    for (index = 0; index < count; ++index) {
+        uint32_t part = 0;
+        while (parts[index][part] && length + 1U < PATH_SIZE) output[length++] = parts[index][part++];
+        if (index + 1U < count && length + 1U < PATH_SIZE) output[length++] = '/';
+    }
     output[length] = 0;
     return 0;
+}
+
+static void set_cwd(const char *path) {
+    uint64_t index;
+    cwd[0] = 'C';
+    cwd[1] = ':';
+    for (index = 0; path[index] && index + 3U < PATH_SIZE; ++index) cwd[index + 2U] = path[index];
+    cwd[index + 2U] = 0;
+}
+
+static int split_command(const char *line, char *name, uint64_t name_size, const char **args) {
+    uint64_t index = 0, length = 0;
+    while (line[index] == ' ') ++index;
+    while (line[index] && line[index] != ' ') {
+        if (length + 1U >= name_size) return -1;
+        name[length++] = line[index++];
+    }
+    name[length] = 0;
+    while (line[index] == ' ') ++index;
+    *args = line + index;
+    return length == 0U ? -1 : 0;
 }
 
 static int login(void) {
@@ -244,47 +256,76 @@ static void interactive_help(void) {
 
 static void command(const char *line) {
     char buffer[QUANTA_SYSCALL_MAX_BUFFER];
-    if (equal(line, "help")) interactive_help();
-    else if (prefix(line, "help ")) {
-        manual(line + 5);
+    char name[32];
+    const char *args = "";
+    if (split_command(line, name, sizeof(name), &args) != 0) return;
+    if (equal(name, "help")) {
+        if (args[0] == 0) interactive_help();
+        else manual(args);
     }
-    else if (prefix(line, "man ")) manual(line + 4);
-    else if (equal(line, "whoami") || equal(line, "id")) write_text("quanta\n");
-    else if (equal(line, "hostname")) write_text("quanta\n");
-    else if (equal(line, "pwd")) { write_text(cwd); write_text("\n"); }
-    else if (equal(line, "cd") || prefix(line, "cd ")) {
-        char path[PATH_SIZE]; struct quanta_file_stat stat; const char *target = equal(line, "cd") ? "/home/quanta" : line + 3;
+    else if (equal(name, "man")) {
+        if (args[0] == 0) write_text("man: usage: man COMMAND\n");
+        else manual(args);
+    }
+    else if (equal(name, "whoami") || equal(name, "id")) write_text("quanta\n");
+    else if (equal(name, "hostname")) write_text("quanta\n");
+    else if (equal(name, "pwd")) { write_text(cwd); write_text("\n"); }
+    else if (equal(name, "cd")) {
+        char path[PATH_SIZE]; struct quanta_file_stat stat;
+        const char *target = args[0] == 0 ? "/home/quanta" : args;
         if (path_resolve(target, path) == 0 &&
             call(QUANTA_SYSCALL_FS_STAT, 1, path, &stat, sizeof(stat)) == 0 &&
-            stat.type == QUANTA_FILE_DIRECTORY) { uint64_t index; cwd[0]='C'; cwd[1]=':'; for (index = 0; path[index] && index + 3U < PATH_SIZE; ++index) cwd[index + 2U] = path[index]; cwd[index + 2U] = 0; }
+            stat.type == QUANTA_FILE_DIRECTORY) set_cwd(path);
         else write_text("cd: no such directory\n");
     }
-    else if (prefix(line, "mkdir ")) {
+    else if (equal(name, "mkdir")) {
         char path[PATH_SIZE];
-        if (path_resolve(line + 6, path) == 0 &&
+        if (args[0] == 0) write_text("mkdir: usage: mkdir PATH...\n");
+        else if (path_resolve(args, path) == 0 &&
             call(QUANTA_SYSCALL_FS_MKDIR, 1, path, 0, 0) == 0) write_text("\n");
         else write_text("mkdir: failed\n");
     }
-    else if (equal(line, "ls") || argument(line, "ls")) {
-        char path[PATH_SIZE]; const char *target = line[2] == 0 ? "." : line + 3;
-        long result = path_resolve(target, path) == 0 ? call(QUANTA_SYSCALL_FS_LIST, 1, path, buffer, sizeof(buffer)) : -1;
-        if (result >= 0) write_text(buffer); else write_text("ls: not found\n");
+    else if (equal(name, "touch")) {
+        char path[PATH_SIZE]; uint64_t handle;
+        struct quanta_file_stat stat;
+        if (args[0] == 0) write_text("touch: usage: touch FILE\n");
+        else if (path_resolve(args, path) != 0) write_text("touch: failed\n");
+        else if (call(QUANTA_SYSCALL_FS_STAT, 1, path, &stat, sizeof(stat)) == 0)
+            write_text("\n");
+        else if (call(QUANTA_SYSCALL_FS_OPEN, 1, path, &handle,
+            QUANTA_OPEN_READ | QUANTA_OPEN_WRITE | QUANTA_OPEN_CREATE) == 0) {
+            call(QUANTA_SYSCALL_FS_CLOSE, handle, 0, 0, 0);
+            write_text("\n");
+        } else write_text("touch: failed\n");
     }
-    else if (prefix(line, "cat ")) {
-        char path[PATH_SIZE]; long result = path_resolve(line + 4, path) == 0 ? call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, sizeof(buffer)) : -1;
-        if (result >= 0) write_text(buffer); else write_text("cat: not found\n");
+    else if (equal(name, "ls")) {
+        char path[PATH_SIZE]; const char *target = args[0] == 0 ? "." : args;
+        long result = path_resolve(target, path) == 0 ?
+            call(QUANTA_SYSCALL_FS_LIST, 1, path, buffer, sizeof(buffer)) : -1;
+        if (result > 0) write_text(buffer);
+        else if (result == 0) { }
+        else write_text("ls: not found\n");
     }
-    else if (prefix(line, "echo ")) { write_text(line + 5); write_text("\n"); }
-    else if (equal(line, "echo")) write_text("\n");
-    else if (prefix(line, "printf ")) { write_text(line + 7); write_text("\n"); }
-    else if (equal(line, "printf")) write_text("printf: usage: printf FORMAT\n");
-    else if (equal(line, "uname")) write_text("QuantaOs x86_64 single-user\n");
-    else if (equal(line, "ps")) write_text("PID STATE NAME\n1 running session\n2 ready console\n");
-    else if (equal(line, "mem") || equal(line, "free")) write_text("memory: bootstrap frame allocator active\n");
-    else if (equal(line, "date")) {
+    else if (equal(name, "cat")) {
+        char path[PATH_SIZE]; long result;
+        if (args[0] == 0) write_text("cat: usage: cat FILE...\n");
+        else {
+            result = path_resolve(args, path) == 0 ?
+                call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, sizeof(buffer)) : -1;
+            if (result >= 0) write_text(buffer); else write_text("cat: not found\n");
+        }
+    }
+    else if (equal(name, "echo")) { write_text(args); write_text("\n"); }
+    else if (equal(name, "printf")) {
+        if (args[0] == 0) write_text("printf: usage: printf FORMAT\n");
+        else { write_text(args); write_text("\n"); }
+    }
+    else if (equal(name, "uname")) write_text("QuantaOs x86_64 single-user\n");
+    else if (equal(name, "ps")) write_text("PID STATE NAME\n1 running session\n2 ready console\n");
+    else if (equal(name, "mem") || equal(name, "free")) write_text("memory: bootstrap frame allocator active\n");
+    else if (equal(name, "date")) {
         uint8_t clock[6];
         char stamp[] = "20xx-xx-xx xx:xx:xx UTC\n";
-        write_text("QUANTA_DATE_CALL\n");
         if (call(QUANTA_SYSCALL_RTC_READ, 1, 0, clock, sizeof(clock)) == 0) {
             two_digits(stamp + 2, clock[0]); two_digits(stamp + 5, clock[1]);
             two_digits(stamp + 8, clock[2]); two_digits(stamp + 11, clock[3]);
@@ -292,21 +333,21 @@ static void command(const char *line) {
             write_text(stamp);
         } else write_text("date: unavailable\n");
     }
-    else if (equal(line, "uptime")) write_text("0:00, 1 user, load average: 0.00\n");
-    else if (equal(line, "env")) write_text("USER=quanta\nHOME=/home/quanta\nSHELL=/bin/session\n");
-    else if (equal(line, "history")) write_text("history is session-local\n");
-    else if (equal(line, "tty")) write_text("/dev/console\n");
-    else if (equal(line, "lsblk")) {
+    else if (equal(name, "uptime")) write_text("0:00, 1 user, load average: 0.00\n");
+    else if (equal(name, "env")) write_text("USER=quanta\nHOME=/home/quanta\nSHELL=/bin/session\n");
+    else if (equal(name, "history")) write_text("history is session-local\n");
+    else if (equal(name, "tty")) write_text("/dev/console\n");
+    else if (equal(name, "lsblk")) {
         struct quanta_system_info info;
         char size[24];
         if (system_info(&info)) {
             decimal(size, info.mount_size_bytes);
             write_text("NAME   SIZE       TYPE  MOUNTPOINT\n");
             write_text("disk0  "); write_text(size); write_text(" bytes  ");
-            write_text(filesystem_name(info.filesystem_kind)); write_text("  /\n");
+            write_text(filesystem_name(info.filesystem_kind)); write_text("  C:/\n");
         } else write_text("lsblk: no block devices\n");
     }
-    else if (equal(line, "df")) {
+    else if (equal(name, "df")) {
         struct quanta_system_info info;
         char size[24];
         if (system_info(&info)) {
@@ -316,53 +357,85 @@ static void command(const char *line) {
             write_text(size); write_text(" bytes  unknown  unknown\n");
         } else write_text("df: unavailable\n");
     }
-    else if (equal(line, "mount")) {
+    else if (equal(name, "mount")) {
         struct quanta_system_info info;
         char size[24];
         if (system_info(&info)) {
             decimal(size, info.mount_size_bytes);
-            write_text("/dev/disk0 on / type ");
+            write_text("/dev/disk0 on C:/ type ");
             write_text(filesystem_name(info.filesystem_kind));
-            write_text(" (ro, ");
+            write_text(" (rw, ");
             write_text(size);
             write_text(" bytes)\n");
         } else write_text("mount: unavailable\n");
     }
-    else if (equal(line, "umount")) write_text("umount: / is busy\n");
-    else if (equal(line, "sync")) write_text("sync: read-only filesystem\n");
-    else if (equal(line, "dmesg")) write_text("QuantaOs kernel: console ps2 rtc ramfs online\n");
-    else if (equal(line, "drivers")) write_text("vga: online\nps2: online\nserial: online\nrtc: online\n");
-    else if (equal(line, "udrive") || equal(line, "udrive list"))
-        write_text("NAME STATE CAPSULE\nconsole online builtin\nstorage online builtin\n");
-    else if (prefix(line, "udrive add ") || prefix(line, "udrive remove ") ||
-             prefix(line, "udrive start ") || prefix(line, "udrive stop ") ||
-             prefix(line, "udrive status "))
-        write_text("udrive: driver capsule service is not available in this session\n");
-    else if (equal(line, "sudrive") || prefix(line, "sudrive "))
+    else if (equal(name, "umount")) write_text("umount: C:/ is busy\n");
+    else if (equal(name, "sync")) write_text("\n");
+    else if (equal(name, "dmesg")) write_text("QuantaOs kernel: console ps2 rtc ramfs online\n");
+    else if (equal(name, "drivers")) write_text("vga: online\nps2: online\nserial: online\nrtc: online\n");
+    else if (equal(name, "udrive")) {
+        if (args[0] == 0 || equal(args, "list"))
+            write_text("NAME STATE CAPSULE\nconsole online builtin\nstorage online builtin\n");
+        else write_text("udrive: driver capsule service is not available in this session\n");
+    }
+    else if (equal(name, "sudrive"))
         write_text("sudrive: administrator driver authority is required\n");
-    else if (equal(line, "login")) write_text("already logged in as quanta\n");
-    else if (prefix(line, "which ")) {
-        const char *name = line + 6;
-        if (equal(name, "cat") || equal(name, "echo") || equal(name, "session")) { write_text("/bin/"); write_text(name); write_text("\n"); }
-        else write_text("which: not found\n");
+    else if (equal(name, "login")) write_text("already logged in as quanta\n");
+    else if (equal(name, "which")) {
+        if (args[0] == 0) write_text("which: usage: which COMMAND\n");
+        else if (equal(args, "cat") || equal(args, "echo") || equal(args, "session") ||
+            equal(args, "mkdir") || equal(args, "ls") || equal(args, "pwd")) {
+            write_text("/bin/"); write_text(args); write_text("\n");
+        } else write_text("which: not found\n");
     }
-    else if (prefix(line, "type ")) { write_text("type: shell builtin\n"); }
-    else if (prefix(line, "head ")) {
-        char path[PATH_SIZE]; long result = path_resolve(line + 5, path) == 0 ? call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, sizeof(buffer)) : -1;
-        if (result >= 0) write_text(buffer); else write_text("head: not found\n");
+    else if (equal(name, "type")) {
+        if (args[0] == 0) write_text("type: usage: type COMMAND\n");
+        else write_text("type: shell builtin\n");
     }
-    else if (prefix(line, "wc ")) {
-        char path[PATH_SIZE]; long result = path_resolve(line + 3, path) == 0 ? call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, sizeof(buffer)) : -1;
-        if (result >= 0) {
-            uint64_t lines = 0, words = 0, bytes = 0; int in_word = 0;
-            while (buffer[bytes]) { if (buffer[bytes] == '\n') ++lines; if (buffer[bytes] == ' ' || buffer[bytes] == '\n') in_word = 0; else if (!in_word) { in_word = 1; ++words; } ++bytes; }
-            char output[64]; decimal(output, lines); write_text(output); write_text(" "); decimal(output, words); write_text(output); write_text(" "); decimal(output, bytes); write_text(output); write_text("\n");
-        } else write_text("wc: not found\n");
+    else if (equal(name, "head")) {
+        char path[PATH_SIZE]; long result;
+        if (args[0] == 0) write_text("head: usage: head FILE\n");
+        else {
+            result = path_resolve(args, path) == 0 ?
+                call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, sizeof(buffer)) : -1;
+            if (result >= 0) write_text(buffer); else write_text("head: not found\n");
+        }
     }
-    else if (prefix(line, "basename ")) { const char *name = line + 9; const char *last = name; while (*name) { if (*name == '/') last = name + 1; ++name; } write_text(last); write_text("\n"); }
-    else if (prefix(line, "dirname ")) { write_text("/\n"); }
-    else if (equal(line, "clear")) clear();
-    else if (equal(line, "passwd")) {
+    else if (equal(name, "wc")) {
+        char path[PATH_SIZE]; long result;
+        if (args[0] == 0) write_text("wc: usage: wc FILE\n");
+        else {
+            result = path_resolve(args, path) == 0 ?
+                call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, sizeof(buffer)) : -1;
+            if (result >= 0) {
+                uint64_t lines = 0, words = 0, bytes = 0; int in_word = 0;
+                while (buffer[bytes]) {
+                    if (buffer[bytes] == '\n') ++lines;
+                    if (buffer[bytes] == ' ' || buffer[bytes] == '\n') in_word = 0;
+                    else if (!in_word) { in_word = 1; ++words; }
+                    ++bytes;
+                }
+                char output[64]; decimal(output, lines); write_text(output); write_text(" ");
+                decimal(output, words); write_text(output); write_text(" ");
+                decimal(output, bytes); write_text(output); write_text("\n");
+            } else write_text("wc: not found\n");
+        }
+    }
+    else if (equal(name, "basename")) {
+        const char *last;
+        if (args[0] == 0) write_text("basename: usage: basename PATH\n");
+        else {
+            last = args;
+            while (*args) { if (*args == '/' || *args == '\\') last = args + 1; ++args; }
+            write_text(last); write_text("\n");
+        }
+    }
+    else if (equal(name, "dirname")) {
+        if (args[0] == 0) write_text("dirname: usage: dirname PATH\n");
+        else write_text("/\n");
+    }
+    else if (equal(name, "clear")) clear();
+    else if (equal(name, "passwd")) {
         char current[65], next[65], confirm[65]; uint32_t temporary; uint64_t current_length;
         write_text("current password: ");
         current_length = read_line(current, sizeof(current), 0);
@@ -380,18 +453,18 @@ static void command(const char *line) {
             else write_text("passwd: password updated\n");
         }
     }
-    else if (equal(line, "true")) { }
-    else if (equal(line, "false")) write_text("false\n");
-    else if (equal(line, "yes")) write_text("yes\n");
-    else if (equal(line, "exit") || equal(line, "logout")) {
+    else if (equal(name, "true")) { }
+    else if (equal(name, "false")) write_text("false\n");
+    else if (equal(name, "yes")) write_text("yes\n");
+    else if (equal(name, "exit") || equal(name, "logout")) {
         call(QUANTA_SYSCALL_SESSION_LOGOUT, 1, 0, 0, 0);
         login();
     }
-    else if (equal(line, "shutdown")) {
+    else if (equal(name, "shutdown")) {
         call(QUANTA_SYSCALL_SHUTDOWN, 1, 0, 0, 0);
     }
-    else if (equal(line, "reboot") || equal(line, "poweroff")) write_text("unsupported: use shutdown\n");
-    else if (*line) write_text("command not found\n");
+    else if (equal(name, "reboot") || equal(name, "poweroff")) write_text("unsupported: use shutdown\n");
+    else write_text("command not found\n");
 }
 
 void _start(void) {
@@ -408,6 +481,7 @@ void _start(void) {
             write_text("\n");
             command(line);
             length = 0;
+            line[0] = 0;
             prompt();
         } else if ((input == 8 || input == 127) && length) {
             --length;
