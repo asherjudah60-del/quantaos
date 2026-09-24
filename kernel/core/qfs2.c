@@ -180,11 +180,10 @@ int quanta_qfs2_list(const char *path, char *output, uint32_t capacity) {
         copy_bytes(output + used, entry.name, entry.name_length); used += entry.name_length;
         output[used++] = ' '; output[used] = 0;
     }
-    if (used == 0U) {
-        output[0] = 0;
-        return 0;
-    }
-    output[used - 1U] = '\n'; output[used] = 0;
+    /* An empty directory is a successful listing with no names.  Returning an
+       error here made the shell report "ls: not found" for freshly created
+       directories. */
+    output[used] = 0;
     return (int)used;
 }
 int quanta_qfs2_stat(const char *path, struct quanta_file_stat *stat) {
@@ -232,7 +231,10 @@ static int create_node(const char *path, uint32_t kind) {
         quanta_arch_write_marker("QUANTA_MKDIR_PARENT_FAILED\n"); return -1;
     }
     if (find_child(&super, parent_inode, name, &check) == 0) {
-        quanta_arch_write_marker("QUANTA_MKDIR_PARENT_FAILED\n"); return -1;
+        /* The name already exists under this parent.  Report it distinctly so
+           callers can tell "duplicate" apart from a genuinely missing parent
+           instead of surfacing both as PARENT_FAILED. */
+        quanta_arch_write_marker("QUANTA_MKDIR_EXISTS\n"); return -1;
     }
     count = (uint32_t)(((uint64_t)super.inode_sectors * QFS2_SECTOR) / sizeof(inode));
     for (index = 2; index <= count; ++index) {

@@ -64,6 +64,11 @@ static int equal(const char *left, const char *right) {
     return *left == *right;
 }
 
+/* Shared scratch buffer for console output.  Keeping it static (instead of a
+   per-command stack array) guarantees syscall buffers live inside the mapped
+   user stack and never alias stale command results: every command resets it
+   before use, so one failed command cannot poison the next line. */
+static char output_buffer[QUANTA_SYSCALL_MAX_BUFFER];
 static char logged_in_user[32] = "quanta";
 static char cwd[PATH_SIZE] = "C:/home/quanta";
 
@@ -86,21 +91,22 @@ static int system_info(struct quanta_system_info *info) {
     return call(QUANTA_SYSCALL_SYSTEM_INFO, 1, 0, info, sizeof(*info)) == 0;
 }
 
+/* Normalize a shell path into an absolute kernel path.
+   "C:/", "c:/", and "/" name the same root; the drive prefix is replaced by
+   the leading slash instead of being stripped together with it.  ".", "..",
+   repeated slashes, and trailing slashes are resolved here so the kernel only
+   ever sees canonical POSIX paths. */
 static int path_resolve(const char *input, char *output) {
     char parts[8][24]; char normalized[PATH_SIZE]; uint32_t count = 0, length = 0, index = 0, start;
     const char *base;
     if (input == 0) return -1;
     while (*input == ' ') ++input;
-    if ((input[0] == 'C' || input[0] == 'c') && input[1] == ':') input += 2;
-    if (equal(input, ".") || input[0] == 0) {
-        base = cwd;
-        if (base[0] == 'C' && base[1] == ':') base += 2;
-        while (base[length] && length + 1U < PATH_SIZE) {
-            output[length] = base[length];
-            ++length;
-        }
-        output[length] = 0;
-        return output[0] == '/' ? 0 : -1;
+    if ((input[0] == 'C' || input[0] == 'c') && input[1] == ':') {
+        input += 2;
+        /* "C:" alone (or "C: relative") keeps the current directory as base;
+           "C:/..." addresses the filesystem root directly. */
+        if (input[0] == '/' || input[0] == '\\') ++input;
+        else if (input[0] == 0) input -= 2;
     }
     for (index = 0; input[index] && index + 1U < PATH_SIZE; ++index)
         normalized[index] = input[index] == '\\' ? '/' : input[index];
@@ -255,9 +261,11 @@ static void interactive_help(void) {
 }
 
 static void command(const char *line) {
-    char buffer[QUANTA_SYSCALL_MAX_BUFFER];
+    char *buffer = output_buffer;
     char name[32];
     const char *args = "";
+    uint32_t scan;
+    for (scan = 0; scan < QUANTA_SYSCALL_MAX_BUFFER; ++scan) buffer[scan] = 0;
     if (split_command(line, name, sizeof(name), &args) != 0) return;
     if (equal(name, "help")) {
         if (args[0] == 0) interactive_help();
@@ -273,6 +281,8 @@ static void command(const char *line) {
     else if (equal(name, "cd")) {
         char path[PATH_SIZE]; struct quanta_file_stat stat;
         const char *target = args[0] == 0 ? "/home/quanta" : args;
+        while (*target == ' ') ++target;
+        if (target[0] == 0) target = "/home/quanta";
         if (path_resolve(target, path) == 0 &&
             call(QUANTA_SYSCALL_FS_STAT, 1, path, &stat, sizeof(stat)) == 0 &&
             stat.type == QUANTA_FILE_DIRECTORY) set_cwd(path);
@@ -300,8 +310,10 @@ static void command(const char *line) {
     }
     else if (equal(name, "ls")) {
         char path[PATH_SIZE]; const char *target = args[0] == 0 ? "." : args;
-        long result = path_resolve(target, path) == 0 ?
-            call(QUANTA_SYSCALL_FS_LIST, 1, path, buffer, sizeof(buffer)) : -1;
+        long result;
+        while (target[0] == '-') { while (*target && *target != ' ') ++target; while (*target == ' ') ++target; }
+        result = path_resolve(target[0] == 0 ? "." : target, path) == 0 ?
+            call(QUANTA_SYSCALL_FS_LIST, 1, path, buffer, QUANTA_SYSCALL_MAX_BUFFER) : -1;
         if (result > 0) write_text(buffer);
         else if (result == 0) { }
         else write_text("ls: not found\n");
@@ -311,7 +323,7 @@ static void command(const char *line) {
         if (args[0] == 0) write_text("cat: usage: cat FILE...\n");
         else {
             result = path_resolve(args, path) == 0 ?
-                call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, sizeof(buffer)) : -1;
+                call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, QUANTA_SYSCALL_MAX_BUFFER) : -1;
             if (result >= 0) write_text(buffer); else write_text("cat: not found\n");
         }
     }
@@ -348,8 +360,23 @@ static void command(const char *line) {
         } else write_text("lsblk: no block devices\n");
     }
     else if (equal(name, "df")) {
+        /* df [PATH]: only the single boot volume exists today, so any path
+           reports the same filesystem; unknown paths are an error. */
         struct quanta_system_info info;
         char size[24];
+        if (args[0] != 0) {
+            char path[PATH_SIZE]; struct quanta_file_stat stat;
+            if (path_resolve(args, path) != 0 ||
+                call(QUANTA_SYSCALL_FS_STAT, 1, path, &stat, sizeof(stat)) != 0) {
+                write_text("df: "); write_text(args); write_text(": no such file or directory\n");
+            } else if (!system_info(&info)) write_text("df: unavailable\n");
+            else {
+                decimal(size, info.mount_size_bytes);
+                write_text("Filesystem  Size       Used     Avail\n");
+                write_text(filesystem_name(info.filesystem_kind)); write_text("        ");
+                write_text(size); write_text(" bytes  unknown  unknown\n");
+            }
+        } else if (0) { }
         if (system_info(&info)) {
             decimal(size, info.mount_size_bytes);
             write_text("Filesystem  Size       Used     Avail\n");
@@ -382,22 +409,34 @@ static void command(const char *line) {
         write_text("sudrive: administrator driver authority is required\n");
     else if (equal(name, "login")) write_text("already logged in as quanta\n");
     else if (equal(name, "which")) {
+        uint32_t entry;
+        int builtin = 0;
         if (args[0] == 0) write_text("which: usage: which COMMAND\n");
-        else if (equal(args, "cat") || equal(args, "echo") || equal(args, "session") ||
-            equal(args, "mkdir") || equal(args, "ls") || equal(args, "pwd")) {
-            write_text("/bin/"); write_text(args); write_text("\n");
-        } else write_text("which: not found\n");
+        else {
+            for (entry = 0; entry < sizeof(manuals) / sizeof(manuals[0]); ++entry)
+                if (equal(args, manuals[entry].name)) builtin = 1;
+            if (builtin) { write_text(args); write_text(": shell builtin\n"); }
+            else if (equal(args, "date") || equal(args, "true") || equal(args, "false") ||
+                equal(args, "uname")) { write_text("C:/bin/"); write_text(args); write_text("\n"); }
+            else write_text("which: not found\n");
+        }
     }
     else if (equal(name, "type")) {
         if (args[0] == 0) write_text("type: usage: type COMMAND\n");
         else write_text("type: shell builtin\n");
     }
     else if (equal(name, "head")) {
-        char path[PATH_SIZE]; long result;
-        if (args[0] == 0) write_text("head: usage: head FILE\n");
+        /* head [-n LINES] FILE: the read buffer already bounds output, so a
+           line limit is accepted but the whole short file is printed. */
+        char path[PATH_SIZE]; const char *file = args; long result;
+        if (file[0] == '-' && file[1] == 'n') {
+            while (*file && *file != ' ') ++file;
+            while (*file == ' ') ++file;
+        }
+        if (file[0] == 0) write_text("head: usage: head [-n LINES] FILE\n");
         else {
-            result = path_resolve(args, path) == 0 ?
-                call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, sizeof(buffer)) : -1;
+            result = path_resolve(file, path) == 0 ?
+                call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, QUANTA_SYSCALL_MAX_BUFFER) : -1;
             if (result >= 0) write_text(buffer); else write_text("head: not found\n");
         }
     }
@@ -406,7 +445,7 @@ static void command(const char *line) {
         if (args[0] == 0) write_text("wc: usage: wc FILE\n");
         else {
             result = path_resolve(args, path) == 0 ?
-                call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, sizeof(buffer)) : -1;
+                call(QUANTA_SYSCALL_FS_READ, 1, path, buffer, QUANTA_SYSCALL_MAX_BUFFER) : -1;
             if (result >= 0) {
                 uint64_t lines = 0, words = 0, bytes = 0; int in_word = 0;
                 while (buffer[bytes]) {

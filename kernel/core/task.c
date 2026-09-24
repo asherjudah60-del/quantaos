@@ -61,12 +61,27 @@ static int user_range_valid(const struct quanta_task *task, uint64_t address,
     uint64_t length, int writable) {
     uint64_t end;
     uint64_t code_end = USER_CODE_BASE + (uint64_t)task->code_page_count * 0x1000U;
-    if (length == 0U) return address != 0U;
+    (void)writable;
+    /* A zero-length transfer carries no data and may not reference a buffer. */
+    if (length == 0U) return 1;
+    if (address == 0U) return 0;
     if (address > ~0ULL - length) return 0;
     end = address + length;
     if (address >= USER_STACK_BASE && end <= USER_STACK_END) return 1;
     if (address >= USER_CODE_BASE && end <= code_end) return 1;
-    (void)writable;
+    return 0;
+}
+
+/* Validate a NUL-terminated user string that must fit inside QUANTA_PATH_MAX
+   bytes without reading past the mapped range. */
+static int user_path_valid(const struct quanta_task *task, uint64_t address) {
+    uint64_t index;
+    const char *text = (const char *)(uintptr_t)address;
+    if (!user_range_valid(task, address, 1U, 0)) return 0;
+    for (index = 0; index < QUANTA_PATH_MAX; ++index) {
+        if (text[index] == 0) return 1;
+        if (!user_range_valid(task, address + index + 1U, 1U, 0)) return 0;
+    }
     return 0;
 }
 
@@ -177,7 +192,7 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
     }
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_FS_READ) {
         if (payload == 0U || length == 0U || length > QUANTA_SYSCALL_MAX_BUFFER) return QUANTA_STATUS_INVALID;
-        if (!user_range_valid(task, message, QUANTA_PATH_MAX, 0) ||
+        if (!user_path_valid(task, message) ||
             !user_range_valid(task, payload, length, 1)) return QUANTA_STATUS_INVALID;
         read_result = mount->provider->read((const char *)(uintptr_t)message,
             (char *)(uintptr_t)payload, (uint32_t)length);
@@ -193,7 +208,7 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
         uint64_t *result = (uint64_t *)(uintptr_t)payload;
         const char *path = (const char *)(uintptr_t)message;
         if (result == NULL ||
-            !user_range_valid(task, message, QUANTA_PATH_MAX, 0) ||
+            !user_path_valid(task, message) ||
             !user_range_valid(task, payload, sizeof(*result), 1) ||
             (length & ~(QUANTA_OPEN_READ | QUANTA_OPEN_WRITE | QUANTA_OPEN_CREATE |
                 QUANTA_OPEN_TRUNCATE | QUANTA_OPEN_DIRECTORY)) != 0U) {
@@ -254,7 +269,7 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
     }
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_FS_LIST) {
         if (payload == 0U || length == 0U || length > QUANTA_SYSCALL_MAX_BUFFER) return QUANTA_STATUS_INVALID;
-        if (!user_range_valid(task, message, QUANTA_PATH_MAX, 0) ||
+        if (!user_path_valid(task, message) ||
             !user_range_valid(task, payload, length, 1)) return QUANTA_STATUS_INVALID;
         read_result = mount->provider->list((const char *)(uintptr_t)message,
             (char *)(uintptr_t)payload, (uint32_t)length);
@@ -268,14 +283,14 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_FS_STAT) {
         struct quanta_file_stat *stat = (struct quanta_file_stat *)(uintptr_t)payload;
         if (stat == 0 || length < sizeof(*stat) ||
-            !user_range_valid(task, message, QUANTA_PATH_MAX, 0) ||
+            !user_path_valid(task, message) ||
             !user_range_valid(task, payload, sizeof(*stat), 1)) return QUANTA_STATUS_INVALID;
         return mount->provider->stat((const char *)(uintptr_t)message, stat) == 0
             ? QUANTA_STATUS_OK : QUANTA_STATUS_INVALID;
     }
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_FS_MKDIR) {
         if ((mount->flags & QUANTA_MOUNT_READ_ONLY) != 0U ||
-            !user_range_valid(task, message, QUANTA_PATH_MAX, 0)) return QUANTA_STATUS_DENIED;
+            !user_path_valid(task, message)) return QUANTA_STATUS_DENIED;
         if (mount->filesystem_kind != QUANTA_FILESYSTEM_QFS2) return QUANTA_STATUS_STATE;
         if (quanta_qfs2_mkdir((const char *)(uintptr_t)message) != 0) {
             quanta_arch_write_marker("QUANTA_MKDIR_FAILED\n");
