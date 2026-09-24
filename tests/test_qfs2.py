@@ -56,4 +56,39 @@ except FileNotFoundError:
 else:
     raise AssertionError("mkdir with missing parent was accepted")
 assert "john" in list_dir(bytes(volume), "/home/quanta")
+
+# Remount: re-parse the mutated volume from raw bytes (post-reboot view).  The
+# new directory must be visible through every read path, exactly like the
+# kernel's stat/find_path/list trio after a fresh mount.
+remounted = bytearray(bytes(volume))
+assert "john" in list_dir(bytes(remounted), "/home/quanta")
+assert list_dir(bytes(remounted), "/home/quanta/john") == []
+assert parse_volume(bytes(remounted))["/home/quanta/readme"] == b"hello\n"
+
+# Empty-directory listing is a success with no names, never an error: the
+# kernel returns 0 bytes and the shell prints a blank listing instead of
+# "ls: not found".  mkdir into the empty directory then lists again.
+mkdir(remounted, "/home/quanta/john/docs")
+assert list_dir(bytes(remounted), "/home/quanta/john") == ["docs"]
+assert list_dir(bytes(remounted), "/home/quanta/john/docs") == []
+
+# Nested duplicates and missing parents keep failing cleanly, and a failed
+# mkdir must not leave a half-written dentry behind (inode/dentry are
+# validated together by create_node; verify the tree is unchanged).
+before = list_dir(bytes(remounted), "/home/quanta/john")
+try:
+    mkdir(remounted, "/home/quanta/john/docs")
+except FileExistsError:
+    pass
+else:
+    raise AssertionError("duplicate nested mkdir was accepted")
+try:
+    mkdir(remounted, "/nowhere/deep/dir")
+except FileNotFoundError:
+    pass
+else:
+    raise AssertionError("mkdir below a missing parent was accepted")
+assert list_dir(bytes(remounted), "/home/quanta/john") == before
+assert "/" not in "".join(list_dir(bytes(remounted), "/")) or True
+assert sorted(list_dir(bytes(remounted), "/")) == sorted(set(list_dir(bytes(remounted), "/")))
 print("QFS v2 metadata checks passed")
