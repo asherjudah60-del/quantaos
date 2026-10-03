@@ -17,21 +17,99 @@ static int text_equal(const char *left, const char *right) { while(*left&&*right
 static uint32_t text_length(const char *text) { uint32_t length=0; while(text[length]) ++length; return length; }
 static int starts_with(const char *text, const char *prefix) { while(*prefix && *text == *prefix) { ++text; ++prefix; } return *prefix == 0; }
 static int listed(const char *output, const char *name) { uint32_t index=0,name_length=text_length(name); while(output[index]) { uint32_t start=index,offset=0; while(output[index] && output[index]!=' ' && output[index]!='\n') ++index; while(offset<name_length&&output[start+offset]==name[offset]) ++offset; if(offset==name_length&&offset==index-start) return 1; while(output[index]==' '||output[index]=='\n') ++index; } return 0; }
+static int normalize_path(const char *path, char output[QUANTA_PATH_MAX]) {
+	uint32_t index = 0, colon = 0, used = 0;
+	if (path == 0) return -1;
+	while (path[colon] && path[colon] != ':') ++colon;
+	if (colon == 0U || path[colon] != ':') return -1;
+	output[used++] = '/';
+	index = colon + 1U;
+	while (path[index] && used + 1U < QUANTA_PATH_MAX) {
+		if (path[index] == '/' || path[index] == '\\' || path[index] == ':') return -1;
+		output[used++] = path[index] == '>' ? '/' : path[index];
+		++index;
+	}
+	if (path[index] != 0) return -1;
+	output[used] = 0;
+	return 0;
+}
 static int read_sector(uint32_t sector_number) {
 	return quanta_block_device_read(quanta_storage_boot_device(), sector_number, sector);
 }
 static int load_super(struct qfs_superblock *super) { if(read_sector(QFS_LBA)!=0)return -1;copy_bytes(super,sector,sizeof(*super));if(super->magic[0]!='Q'||super->magic[1]!='F'||super->magic[2]!='S'||super->version!=1U||super->sector_size!=QFS_SECTOR||super->count==0U||super->table_lba<QFS_LBA+1U||super->data_lba<super->table_lba)return -1;if(super->checksum!=crc32(sector,28U))return -1;return 0; }
-int quanta_qfs_read(const char *path, char *output, uint32_t capacity) { struct qfs_superblock super;struct qfs_record record;uint32_t index,offset,copied;if(path==0||output==0||capacity==0U||load_super(&super)!=0)return -1;for(index=0;index<super.count;++index){uint32_t record_offset=index*QFS_RECORD_SIZE;uint32_t record_lba=super.table_lba+record_offset/QFS_SECTOR;uint32_t record_byte=record_offset%QFS_SECTOR;if(read_sector(record_lba)!=0)return -1;copy_bytes(&record,sector+record_byte,sizeof(record));if(record.flags==QFS_FILE&&text_equal(record.path,path)){if(record.size>=capacity||record.sectors==0U||record.lba<super.data_lba)return -1;copied=0;for(offset=0;offset<record.sectors&&copied<record.size;++offset){uint32_t count=record.size-copied;if(count>QFS_SECTOR)count=QFS_SECTOR;if(read_sector(record.lba+offset)!=0)return -1;for(uint32_t byte=0;byte<count;++byte)output[copied+byte]=(char)sector[byte];copied+=count;}output[copied]=0;return (int)copied;}}return -1;}
-int quanta_qfs_list(const char *path, char *output, uint32_t capacity) { struct qfs_superblock super;struct qfs_record record;uint32_t index,offset,prefix_length,used=0;char prefix[QFS_PATH_SIZE];if(path==0||output==0||capacity<2U||load_super(&super)!=0)return -1;output[0]=0;if(path[0]=='/'&&path[1]==0){prefix[0]='/';prefix[1]=0;}else{text_length(path);for(prefix_length=0;path[prefix_length]&&prefix_length+1U<QFS_PATH_SIZE;++prefix_length)prefix[prefix_length]=path[prefix_length];if(prefix_length==0||prefix[prefix_length-1U]!='/')prefix[prefix_length++]='/';prefix[prefix_length]=0;}prefix_length=text_length(prefix);for(index=0;index<super.count;++index){uint32_t record_offset=index*QFS_RECORD_SIZE;uint32_t record_lba=super.table_lba+record_offset/QFS_SECTOR;uint32_t record_byte=record_offset%QFS_SECTOR;uint32_t name_length=0;char name[QFS_PATH_SIZE];if(read_sector(record_lba)!=0)return -1;copy_bytes(&record,sector+record_byte,sizeof(record));if(record.flags!=QFS_FILE||!starts_with(record.path,prefix)||record.path[prefix_length]==0)continue;while(record.path[prefix_length+name_length]&&record.path[prefix_length+name_length]!='/') {name[name_length]=record.path[prefix_length+name_length];++name_length;}name[name_length]=0;if(listed(output,name))continue;if(used+name_length+2U>=capacity)return -1;for(offset=0;offset<name_length;++offset)output[used++]=name[offset];output[used++]=' ';output[used]=0;}if(used==0)return -1;output[used-1U]='\n';output[used]=0;return (int)used;}
+int quanta_qfs_read(const char *path, char *output, uint32_t capacity) {
+	struct qfs_superblock super; struct qfs_record record;
+	char normalized[QUANTA_PATH_MAX]; uint32_t index, offset, copied;
+	if (output == 0 || capacity == 0U || normalize_path(path, normalized) != 0 ||
+		load_super(&super) != 0) return -1;
+	for (index = 0; index < super.count; ++index) {
+		uint32_t record_offset = index * QFS_RECORD_SIZE;
+		uint32_t record_lba = super.table_lba + record_offset / QFS_SECTOR;
+		uint32_t record_byte = record_offset % QFS_SECTOR;
+		if (read_sector(record_lba) != 0) return -1;
+		copy_bytes(&record, sector + record_byte, sizeof(record));
+		if (record.flags != QFS_FILE || !text_equal(record.path, normalized)) continue;
+		if (record.size >= capacity || record.sectors == 0U || record.lba < super.data_lba) return -1;
+		copied = 0;
+		for (offset = 0; offset < record.sectors && copied < record.size; ++offset) {
+			uint32_t count = record.size - copied;
+			if (count > QFS_SECTOR) count = QFS_SECTOR;
+			if (read_sector(record.lba + offset) != 0) return -1;
+			for (uint32_t byte = 0; byte < count; ++byte) output[copied + byte] = (char)sector[byte];
+			copied += count;
+		}
+		output[copied] = 0;
+		return (int)copied;
+	}
+	return -1;
+}
+int quanta_qfs_list(const char *path, char *output, uint32_t capacity) {
+	struct qfs_superblock super; struct qfs_record record;
+	uint32_t index, offset, prefix_length, used = 0;
+	char prefix[QFS_PATH_SIZE], normalized[QUANTA_PATH_MAX];
+	if (output == 0 || capacity < 2U || normalize_path(path, normalized) != 0 ||
+		load_super(&super) != 0) return -1;
+	output[0] = 0;
+	prefix_length = text_length(normalized);
+	for (index = 0; index < prefix_length && index + 1U < sizeof(prefix); ++index)
+		prefix[index] = normalized[index];
+	if (index == 0U || index + 1U >= sizeof(prefix)) return -1;
+	if (prefix[index - 1U] != '/') prefix[index++] = '/';
+	prefix[index] = 0;
+	prefix_length = index;
+	for (index = 0; index < super.count; ++index) {
+		uint32_t record_offset = index * QFS_RECORD_SIZE;
+		uint32_t record_lba = super.table_lba + record_offset / QFS_SECTOR;
+		uint32_t record_byte = record_offset % QFS_SECTOR;
+		uint32_t name_length = 0; char name[QFS_PATH_SIZE];
+		if (read_sector(record_lba) != 0) return -1;
+		copy_bytes(&record, sector + record_byte, sizeof(record));
+		if (record.flags != QFS_FILE || !starts_with(record.path, prefix) ||
+			record.path[prefix_length] == 0) continue;
+		while (record.path[prefix_length + name_length] &&
+			record.path[prefix_length + name_length] != '/') {
+			name[name_length] = record.path[prefix_length + name_length];
+			++name_length;
+		}
+		name[name_length] = 0;
+		if (listed(output, name)) continue;
+		if (used + name_length + 2U >= capacity) return -1;
+		for (offset = 0; offset < name_length; ++offset) output[used++] = name[offset];
+		output[used++] = ' '; output[used] = 0;
+	}
+	if (used == 0U) return -1;
+	output[used - 1U] = '\n'; output[used] = 0;
+	return (int)used;
+}
 int quanta_qfs_stat(const char *path, struct quanta_file_stat *stat) {
 	struct qfs_superblock super; struct qfs_record record; uint32_t index;
-	char listing[QFS_PATH_SIZE];
-	if (path == 0 || stat == 0 || load_super(&super) != 0) return -1;
+	char listing[QFS_PATH_SIZE], normalized[QUANTA_PATH_MAX];
+	if (stat == 0 || normalize_path(path, normalized) != 0 || load_super(&super) != 0) return -1;
 	for (index = 0; index < super.count; ++index) {
 		uint32_t record_offset = index * QFS_RECORD_SIZE;
 		if (read_sector(super.table_lba + record_offset / QFS_SECTOR) != 0) return -1;
 		copy_bytes(&record, sector + record_offset % QFS_SECTOR, sizeof(record));
-		if (record.flags == QFS_FILE && text_equal(record.path, path)) {
+		if (record.flags == QFS_FILE && text_equal(record.path, normalized)) {
 			stat->inode = index + 1U; stat->size = record.size;
 			stat->blocks = record.sectors; stat->mode = 0644U;
 			stat->uid = 1000U; stat->gid = 1000U; stat->type = QUANTA_FILE_REGULAR;

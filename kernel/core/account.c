@@ -1,8 +1,8 @@
 #include <stdint.h>
 #include <quanta/account.h>
-#include <quanta/arch.h>
+#include <quanta/vfs.h>
 
-#define ACCOUNT_LBA 256U
+#define ACCOUNT_LBA 512U
 #define ACCOUNT_SIZE 512U
 #define FLAG_TEMPORARY 1U
 #define ACCOUNT_VERSION 1U
@@ -43,10 +43,16 @@ static int record_valid(const uint8_t *record) {
         *(uint16_t *)(record + 8) == ACCOUNT_VERSION &&
         *(uint32_t *)(record + 68) == crc32(record, 68U);
 }
+static int account_read(uint32_t sector, void *buffer) {
+    return quanta_block_device_read(quanta_storage_boot_device(), sector, buffer);
+}
+static int account_write(uint32_t sector, const void *buffer) {
+    return quanta_block_device_write(quanta_storage_boot_device(), sector, buffer);
+}
 int quanta_account_verify(const char *password, uint64_t length, uint32_t *temporary) {
     uint8_t first[ACCOUNT_SIZE], second[ACCOUNT_SIZE], digest[32], input[80]; uint8_t *record; uint64_t generation, other_generation; uint32_t i;
     if (password == 0 || temporary == 0 || length > 64U) return -1;
-    if (quanta_arch_disk_read(ACCOUNT_LBA, first) != 0 || quanta_arch_disk_read(ACCOUNT_LBA + 1U, second) != 0) return -1;
+    if (account_read(ACCOUNT_LBA, first) != 0 || account_read(ACCOUNT_LBA + 1U, second) != 0) return -1;
     record = first; generation = 0; other_generation = 0;
     if (first[0]=='Q' && first[1]=='A' && first[2]=='C' && first[3]=='C' && first[4]=='O' && first[5]=='U' && first[6]=='N' && first[7]=='T') generation = *(uint64_t *)(first+12);
     if (second[0]=='Q' && second[1]=='A' && second[2]=='C' && second[3]=='C' && second[4]=='O' && second[5]=='U' && second[6]=='N' && second[7]=='T') other_generation = *(uint64_t *)(second+12);
@@ -63,8 +69,8 @@ int quanta_account_change(const char *password, uint64_t length) {
     uint8_t input[80], digest[32], *active, *target; uint64_t generation;
     uint32_t active_lba, target_lba, index, temporary;
     if (password == 0 || length == 0U || length > 64U) return -1;
-    if (quanta_arch_disk_read(ACCOUNT_LBA, first) != 0 ||
-        quanta_arch_disk_read(ACCOUNT_LBA + 1U, second) != 0) return -1;
+    if (account_read(ACCOUNT_LBA, first) != 0 ||
+        account_read(ACCOUNT_LBA + 1U, second) != 0) return -1;
     if (!record_valid(first) && !record_valid(second)) return -1;
     active = record_valid(first) ? first : second;
     active_lba = active == first ? ACCOUNT_LBA : ACCOUNT_LBA + 1U;
@@ -84,8 +90,8 @@ int quanta_account_change(const char *password, uint64_t length) {
     for (index = 0; index < 16U; ++index) record[20U + index] = input[index];
     for (index = 0; index < 32U; ++index) record[36U + index] = digest[index];
     *(uint32_t *)(record + 68) = crc32(record, 68U);
-    if (quanta_arch_disk_write(target_lba, record) != 0 ||
-        quanta_arch_disk_read(target_lba, target) != 0 || !record_valid(target) ||
+    if (account_write(target_lba, record) != 0 ||
+        account_read(target_lba, target) != 0 || !record_valid(target) ||
         *(uint64_t *)(target + 12) != generation || !equal(target + 36, digest, 32U)) return -1;
     temporary = 0;
     return quanta_account_verify(password, length, &temporary);

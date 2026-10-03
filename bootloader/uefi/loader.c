@@ -23,6 +23,7 @@ typedef EFI_STATUS (*allocate_pool_fn)(uint32_t, uint64_t, void **);
 typedef EFI_STATUS (*get_memory_map_fn)(uint64_t *, void *, uint64_t *, uint64_t *, uint32_t *);
 typedef EFI_STATUS (*exit_boot_services_fn)(EFI_HANDLE, uint64_t);
 typedef EFI_STATUS (*output_string_fn)(void *, uint16_t *);
+typedef EFI_STATUS (*locate_protocol_fn)(void *, void *, void **);
 
 struct EFI_BOOT_SERVICES {
     uint8_t header[24];
@@ -48,6 +49,29 @@ struct EFI_MEMORY_DESCRIPTOR {
     uint64_t virtual_start;
     uint64_t pages;
     uint64_t attributes;
+};
+struct EFI_GUID { uint32_t data1; uint16_t data2, data3; uint8_t data4[8]; };
+struct EFI_GRAPHICS_OUTPUT_MODE_INFORMATION {
+    uint32_t version;
+    uint32_t horizontal_resolution;
+    uint32_t vertical_resolution;
+    uint32_t pixel_format;
+    uint32_t pixel_information[4];
+    uint32_t pixels_per_scan_line;
+};
+struct EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE {
+    uint32_t max_mode;
+    uint32_t mode;
+    struct EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info;
+    uint64_t size_of_info;
+    uint64_t framebuffer_base;
+    uint64_t framebuffer_size;
+};
+struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
+    void *query_mode;
+    void *set_mode;
+    void *blt;
+    struct EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *mode;
 };
 struct elf64_header {
     uint8_t ident[16]; uint16_t type, machine; uint32_t version;
@@ -97,6 +121,23 @@ static int add_overflow(uint64_t left, uint64_t right, uint64_t *result) {
     if (left > ~0ULL - right) return 1;
     *result = left + right;
     return 0;
+}
+static uint64_t collect_memory_regions(const uint8_t *map_buffer, uint64_t map_size,
+    uint64_t descriptor_size, struct quanta_boot_memory_region *regions) {
+    uint64_t count = 0;
+    if (descriptor_size < sizeof(struct EFI_MEMORY_DESCRIPTOR)) return 0;
+    for (uint64_t offset = 0; offset + descriptor_size <= map_size &&
+        count < QUANTA_BOOT_MAX_MEMORY_REGIONS; offset += descriptor_size) {
+        const struct EFI_MEMORY_DESCRIPTOR *descriptor =
+            (const struct EFI_MEMORY_DESCRIPTOR *)(map_buffer + offset);
+        if (descriptor->type != EFI_CONVENTIONAL_MEMORY) continue;
+        regions[count].physical_start = descriptor->physical_start;
+        regions[count].length = descriptor->pages * PAGE_SIZE;
+        regions[count].type = QUANTA_BOOT_MEMORY_USABLE;
+        regions[count].attributes = 0;
+        ++count;
+    }
+    return count;
 }
 static int load_kernel(uint64_t destination, uint64_t allocation_size,
     uint64_t *entry_point) {
@@ -160,7 +201,7 @@ static void build_tables(uint64_t pml4_physical, uint64_t kernel_physical) {
     for (index = 0, address = 0; index < 512; ++index, address += 0x200000) pdlow[index] = address | PAGE_LARGE;
     pdhigh[0] = (uint64_t)pt1 | PAGE_PRESENT_WRITE;
     pdhigh[1] = (uint64_t)pt2 | PAGE_PRESENT_WRITE;
-    for (index = 0, address = kernel_physical; index < 256; ++index, address += PAGE_SIZE) pt1[index] = address | PAGE_PRESENT_WRITE;
+    for (index = 0, address = kernel_physical; index < 256; ++index, address += PAGE_SIZE) pt1[256 + index] = address | PAGE_PRESENT_WRITE;
     for (index = 0, address = kernel_physical + 256 * PAGE_SIZE; index < 256; ++index, address += PAGE_SIZE) pt2[index] = address | PAGE_PRESENT_WRITE;
 }
 static void jump_kernel(uint64_t root, uint64_t entry, struct quanta_boot_info *info) {
@@ -178,22 +219,55 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *table) {
     uint64_t storage_address = 0;
     uint64_t info_address = 0x9000;
     uint64_t map_address = 0x5000;
-    void **console;
     allocate_pool_fn allocate_pool = (allocate_pool_fn)bs_function(table, 5);
     get_memory_map_fn get_map = (get_memory_map_fn)bs_function(table, 4);
     exit_boot_services_fn exit_boot = (exit_boot_services_fn)bs_function(table, 26);
+    locate_protocol_fn locate_protocol = (locate_protocol_fn)bs_function(table, 37);
     uint8_t *map_buffer = 0; uint64_t map_size = 65536, map_key, descriptor_size; uint32_t descriptor_version;
-    uint64_t *info_words = (uint64_t *)info_address;
+    struct quanta_boot_info *boot_info = (struct quanta_boot_info *)(uintptr_t)info_address;
     struct quanta_boot_memory_region *regions = (struct quanta_boot_memory_region *)map_address;
-    uint64_t region_count = 0, offset, entry;
+    struct EFI_GRAPHICS_OUTPUT_PROTOCOL *graphics = 0;
+    struct EFI_GUID graphics_guid = { 0x9042a9deU, 0x23dcU, 0x4a38U,
+        { 0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a } };
+    uint64_t region_count, entry, framebuffer_bytes;
     EFI_STATUS status;
-    (void)image_handle; (void)console; (void)allocate_pool;
+    (void)allocate_pool;
     serial_init();
     serial_text("QUANTA_UEFI_ENTRY\n");
+    status = locate_protocol(&graphics_guid, 0, (void **)&graphics);
+    if (status != EFI_SUCCESS || graphics == 0 || graphics->mode == 0 ||
+        graphics->mode->info == 0) {
+        serial_text("QUANTA_UEFI_GOP_ERROR\n");
+        return 1;
+    }
+    uint32_t pixel_format = graphics->mode->info->pixel_format;
+    uint8_t framebuffer_format;
+    if (pixel_format == 0U) framebuffer_format = QUANTA_FRAMEBUFFER_FORMAT_RGBX8888;
+    else if (pixel_format == 1U) framebuffer_format = QUANTA_FRAMEBUFFER_FORMAT_BGRX8888;
+    else if (pixel_format == 2U &&
+        graphics->mode->info->pixel_information[0] == 0x00ff0000U &&
+        graphics->mode->info->pixel_information[1] == 0x0000ff00U &&
+        graphics->mode->info->pixel_information[2] == 0x000000ffU)
+        framebuffer_format = QUANTA_FRAMEBUFFER_FORMAT_BGRX8888;
+    else {
+        serial_text("QUANTA_UEFI_GOP_FORMAT\n");
+        return 1;
+    }
+    framebuffer_bytes = (uint64_t)graphics->mode->info->pixels_per_scan_line *
+        graphics->mode->info->vertical_resolution * 4U;
+    if (graphics->mode->framebuffer_base == 0U ||
+        framebuffer_bytes > graphics->mode->framebuffer_size ||
+        framebuffer_bytes > 0x01000000U ||
+        graphics->mode->info->pixels_per_scan_line <
+            graphics->mode->info->horizontal_resolution) {
+        serial_text("QUANTA_UEFI_GOP_BOUNDS\n");
+        return 1;
+    }
     if (allocate_pages(table, EFI_ALLOCATE_ANY, &kernel_address, kernel_pages) != EFI_SUCCESS) {
         serial_text("QUANTA_UEFI_ALLOC_KERNEL\n"); return 1;
     }
-    if (allocate_pages(table, EFI_ALLOCATE_ANY, &pml4_address, 6) != EFI_SUCCESS) {
+    pml4_address = PML4_PHYSICAL;
+    if (allocate_pages(table, EFI_ALLOCATE_ADDRESS, &pml4_address, 6) != EFI_SUCCESS) {
         serial_text("QUANTA_UEFI_ALLOC_PAGING\n"); return 1;
     }
     if (allocate_pages(table, EFI_ALLOCATE_ANY, &storage_address, storage_pages) != EFI_SUCCESS) {
@@ -209,19 +283,21 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *table) {
     serial_text("QUANTA_UEFI_EXIT_READY\n");
     status = get_map(&map_size, map_buffer, &map_key, &descriptor_size, &descriptor_version);
     if (status != EFI_SUCCESS) return 1;
-    for (offset = 0; offset + descriptor_size <= map_size && region_count < QUANTA_BOOT_MAX_MEMORY_REGIONS; offset += descriptor_size) {
-        struct EFI_MEMORY_DESCRIPTOR *descriptor = (struct EFI_MEMORY_DESCRIPTOR *)(map_buffer + offset);
-        if (descriptor->type == EFI_CONVENTIONAL_MEMORY) {
-            regions[region_count].physical_start = descriptor->physical_start;
-            regions[region_count].length = descriptor->pages * PAGE_SIZE;
-            regions[region_count].type = QUANTA_BOOT_MEMORY_USABLE;
-            regions[region_count].attributes = 0; ++region_count;
-        }
-    }
-    info_words[0] = QUANTA_BOOT_INFO_MAGIC; ((uint32_t *)info_words)[2] = QUANTA_BOOT_INFO_VERSION;
-    ((uint32_t *)info_words)[3] = sizeof(struct quanta_boot_info);
-    info_words[2] = (uint64_t)regions; info_words[3] = region_count;
-    info_words[8] = storage_address; info_words[9] = (storage_size + 511U) / 512U;
+    region_count = collect_memory_regions(map_buffer, map_size, descriptor_size, regions);
+    boot_info->magic = QUANTA_BOOT_INFO_MAGIC;
+    boot_info->version = QUANTA_BOOT_INFO_VERSION;
+    boot_info->size = sizeof(*boot_info);
+    boot_info->memory_map_physical = (uint64_t)(uintptr_t)regions;
+    boot_info->memory_map_entries = region_count;
+    boot_info->framebuffer_physical = graphics->mode->framebuffer_base;
+    boot_info->framebuffer_width = graphics->mode->info->horizontal_resolution;
+    boot_info->framebuffer_height = graphics->mode->info->vertical_resolution;
+    boot_info->framebuffer_pitch = graphics->mode->info->pixels_per_scan_line * 4U;
+    boot_info->framebuffer_bpp = 32U;
+    boot_info->framebuffer_format = framebuffer_format;
+    boot_info->storage_physical = storage_address;
+    boot_info->storage_sectors = (storage_size + 511U) / 512U;
+    serial_text("QUANTA_UEFI_GOP_READY\n");
     status = exit_boot(image_handle, map_key);
     if (status != EFI_SUCCESS) {
         serial_text("QUANTA_UEFI_EXIT_RETRY\n");
@@ -232,6 +308,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *table) {
             serial_text("QUANTA_UEFI_MAP_RETRY_ERROR\n");
             return 1;
         }
+        region_count = collect_memory_regions(map_buffer, map_size, descriptor_size, regions);
+        boot_info->memory_map_entries = region_count;
         status = exit_boot(image_handle, map_key);
         if (status != EFI_SUCCESS) {
             serial_text("QUANTA_UEFI_EXIT_ERROR\n");

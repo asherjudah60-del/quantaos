@@ -10,8 +10,11 @@ void quanta_kernel_main(const struct quanta_boot_info *boot_info) {
     quanta_arch_initialize((uint64_t)(uintptr_t)(kernel_stack + sizeof(kernel_stack)));
     quanta_arch_storage_initialize(boot_info);
     quanta_memory_initialize(boot_info);
+    quanta_arch_display_initialize(boot_info);
     quanta_arch_write_marker("QUANTA_KERNEL_READY\n");
     quanta_arch_console_initialize();
+    quanta_arch_boot_splash(5U);
+    quanta_arch_write_marker("QUANTA_BOOT_SPLASH_READY\n");
 
     quanta_task_bootstrap();
 }

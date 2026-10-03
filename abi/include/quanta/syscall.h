@@ -33,6 +33,10 @@ enum quanta_syscall_number {
     QUANTA_SYSCALL_FS_CHMOD = 25,
     QUANTA_SYSCALL_FS_SYNC = 26,
     QUANTA_SYSCALL_AUTH_CHANGE = 27,
+    QUANTA_SYSCALL_STORAGE_LIST = 28,
+    QUANTA_SYSCALL_DESKTOP_DRAW = 29,
+    QUANTA_SYSCALL_DESKTOP_VIEW = 30,
+    QUANTA_SYSCALL_DESKTOP_PRESENT = 31,
 };
 
 enum quanta_status {
@@ -45,7 +49,7 @@ enum quanta_status {
 
 #define QUANTA_IPC_MAX_PAYLOAD 64U
 #define QUANTA_SYSCALL_MAX_BUFFER 256U
-#define QUANTA_ACCOUNT_LBA 256U
+#define QUANTA_ACCOUNT_LBA 512U /* on-disk ABI; see quanta/disk_layout.h in kernel */
 #define QUANTA_ACCOUNT_SLOT_COUNT 2U
 #define QUANTA_ACCOUNT_RECORD_SIZE 512U
 #define QUANTA_FILE_HANDLE_INVALID 0U
@@ -87,6 +91,52 @@ struct quanta_system_info {
     uint64_t mount_size_bytes;
     uint32_t mount_read_only;
     uint32_t filesystem_kind;
+    uint32_t display_width;
+    uint32_t display_height;
+} __attribute__((packed));
+struct quanta_storage_info {
+    char name[8];
+    uint32_t flags;
+    uint64_t sector_count;
+} __attribute__((packed));
+#define QUANTA_STORAGE_LIVE (1U << 0)
+#define QUANTA_STORAGE_READ_ONLY (1U << 1)
+#define QUANTA_KEY_ALT_F1 0x10001
+#define QUANTA_KEY_ALT_F2 0x10002
+#define QUANTA_KEY_UP 0x10003
+#define QUANTA_KEY_DOWN 0x10004
+#define QUANTA_KEY_MOUSE 0x20000000
+#define QUANTA_MOUSE_EVENT(x, y, buttons) (QUANTA_KEY_MOUSE | (((buttons) & 7U) << 24) | (((y) & 0xfffU) << 12) | ((x) & 0xfffU))
+#define QUANTA_MOUSE_EVENT_X(event) ((uint32_t)(event) & 0xfffU)
+#define QUANTA_MOUSE_EVENT_Y(event) (((uint32_t)(event) >> 12) & 0xfffU)
+#define QUANTA_MOUSE_EVENT_BUTTONS(event) (((uint32_t)(event) >> 24) & 7U)
+#define QUANTA_DESKTOP_VIEW_WORKSPACE 0U
+#define QUANTA_DESKTOP_VIEW_TERMINAL 1U
+#define QUANTA_DESKTOP_DRAW_RECT 1U
+#define QUANTA_DESKTOP_DRAW_TEXT 2U
+#define QUANTA_DESKTOP_DRAW_TERMINAL_PROMPT 3U
+#define QUANTA_DESKTOP_DRAW_WALLPAPER 4U
+#define QUANTA_DESKTOP_DRAW_ICON 5U
+#define QUANTA_DESKTOP_DRAW_ROUNDED_RECT 6U
+#define QUANTA_DESKTOP_ICON_SIZE 24U
+#define QUANTA_DESKTOP_ICON_FILES 0U
+#define QUANTA_DESKTOP_ICON_SETTINGS 1U
+#define QUANTA_DESKTOP_ICON_TERMINAL 2U
+#define QUANTA_DESKTOP_ICON_MENU 3U
+#define QUANTA_DESKTOP_ICON_WIFI 4U
+#define QUANTA_DESKTOP_ICON_SPEAKER 5U
+#define QUANTA_DESKTOP_ICON_BATTERY 6U
+#define QUANTA_DESKTOP_ICON_FILE 7U
+#define QUANTA_DESKTOP_DRAW_MAX_COMMANDS 32U
+struct quanta_desktop_draw_command {
+    uint32_t operation;
+    uint32_t x;
+    uint32_t y;
+    uint32_t width;
+    uint32_t height;
+    uint32_t color;
+    uint32_t text_length;
+    char text[128];
 } __attribute__((packed));
 #define QUANTA_FILESYSTEM_UNKNOWN 0U
 #define QUANTA_FILESYSTEM_QFS1 1U

@@ -6,7 +6,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from account import AccountRecord, RECORD_SIZE
 
-ACCOUNT_LBA = 256
+ACCOUNT_LBA = 512
 image = ROOT / "build" / "quantaos.img"
 if image.exists():
     data = image.read_bytes()

@@ -2,7 +2,7 @@
 #include <quanta/arch.h>
 #include <quanta/vfs.h>
 
-#define QFS2_LBA 258U
+#define QFS2_LBA 514U
 #define QFS2_SECTOR 512U
 #define QFS2_ROOT_INODE 1U
 #define QFS2_FILE 1U
@@ -130,17 +130,26 @@ static int find_path(const struct qfs2_superblock *super, const char *path,
     uint64_t *result) {
     char component[49]; uint64_t current = QFS2_ROOT_INODE, child;
     uint32_t index = 0, length;
-    if (path == 0 || path[0] != '/') return -1;
-    while (path[index] == '/') ++index;
+    if (path == 0) return -1;
+    while (path[index] && path[index] != ':') ++index;
+    if (path[index] != ':' ||
+        !((index == 5U && path[0] == 'p' && path[1] == 'r' && path[2] == 'i' && path[3] == 'm' && path[4] == 'e') ||
+          (index == 4U && path[0] == 'l' && path[1] == 'i' && path[2] == 'v' && path[3] == 'e'))) return -1;
+    ++index;
     if (path[index] == 0) { *result = current; return 0; }
     while (path[index]) {
         length = 0;
-        while (path[index] && path[index] != '/') {
+        while (path[index] && path[index] != '>') {
+            if (path[index] == '/' || path[index] == '\\' || path[index] == ':') return -1;
             if (length + 1U >= sizeof(component)) return -1;
             component[length++] = path[index++];
         }
         component[length] = 0;
-        while (path[index] == '/') ++index;
+        if (path[index] == '>') {
+            ++index;
+            if (path[index] == '>') return -1;
+        }
+        if (length == 0U) continue;
         if (find_child(super, current, component, &child) != 0) return -1;
         current = child;
     }
@@ -199,24 +208,30 @@ int quanta_qfs2_stat(const char *path, struct quanta_file_stat *stat) {
 }
 
 static int split_path(const char *path, char *parent, char *name) {
-    uint32_t length = 0, cut = 0, index;
-    if (path == 0 || path[0] != '/') return -1;
-    while (path[length]) { if (path[length] == '/') cut = length; ++length; }
-    while (length > 1U && path[length - 1U] == '/') --length;
-    while (cut > 0U && cut >= length) {
-        --cut;
-        while (cut > 0U && path[cut] != '/') --cut;
+    uint32_t length = 0, drive_end = 0, cut = 0, index;
+    if (path == 0) return -1;
+    while (path[drive_end] && path[drive_end] != ':') ++drive_end;
+    if (path[drive_end] != ':') return -1;
+    while (path[length]) {
+        if (path[length] == '/' || path[length] == '\\') return -1;
+        ++length;
     }
-    if (length <= 1U || path[cut + 1U] == 0 ||
-        length - cut - 1U >= 49U || cut >= 96U) return -1;
-    if (cut == 0U) {
-        parent[0] = '/';
-        parent[1] = 0;
+    while (length > drive_end + 1U && path[length - 1U] == '>') --length;
+    if (length <= drive_end + 1U) return -1;
+    for (index = drive_end + 1U; index < length; ++index) {
+        if (path[index] == '>') cut = index;
+    }
+    if (length - cut - 1U >= 49U || cut >= 96U) return -1;
+    if (cut <= drive_end) {
+        for (index = 0; index <= drive_end; ++index) parent[index] = path[index];
+        parent[drive_end + 1U] = 0;
+        cut = drive_end;
     } else {
         for (index = 0; index < cut; ++index) parent[index] = path[index];
         parent[cut] = 0;
     }
-    for (index = 0; index + cut + 1U < length; ++index) name[index] = path[cut + 1U + index];
+    for (index = 0; index + cut + 1U < length; ++index)
+        name[index] = path[cut + 1U + index];
     name[length - cut - 1U] = 0;
     return 0;
 }

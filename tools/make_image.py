@@ -13,12 +13,14 @@ from elf64 import validate_kernel_elf_bytes
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from account import AccountRecord, make_record
-from qfs2 import SUPERBLOCK_LBA, build_volume
+from qfs2 import build_volume
+from disk_layout import (ACCOUNT_LBA, ACCOUNT_SLOT_COUNT, DISK_SIZE_BYTES,
+    MBR_PARTITION_LBA, QFS2_LBA, SECTOR_SIZE, disk_sector_count,
+    validate_boot_prefix)
 
-SECTOR = 512
-DISK_SIZE = 10 * 1024 * 1024 * 1024
-ACCOUNT_LBA = 256
-ACCOUNT_SLOTS = 2
+SECTOR = SECTOR_SIZE
+DISK_SIZE = DISK_SIZE_BYTES
+ACCOUNT_SLOTS = ACCOUNT_SLOT_COUNT
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--nasm", required=True)
@@ -68,22 +70,40 @@ if stage2.stat().st_size > 0x18000:
 stage1 = args.build / "stage1.bin"
 subprocess.run([args.nasm, "-f", "bin", "-I", str(args.build) + "/", str(args.stage1),
     "-o", str(stage1)], check=True)
-if stage1.stat().st_size != SECTOR or stage1.read_bytes()[-2:] != b"\x55\xaa":
+stage1_bytes = bytearray(stage1.read_bytes())
+if len(stage1_bytes) != SECTOR or stage1_bytes[-2:] != b"\x55\xaa":
     raise SystemExit("stage 1 is not a bootable 512-byte MBR")
+partition_sectors = disk_sector_count() - MBR_PARTITION_LBA
+stage1_bytes[446:462] = bytes((
+    0x80, 0xfe, 0xff, 0xff, 0x83, 0xfe, 0xff, 0xff,
+    MBR_PARTITION_LBA, 0, 0, 0,
+    partition_sectors & 0xff, (partition_sectors >> 8) & 0xff,
+    (partition_sectors >> 16) & 0xff, (partition_sectors >> 24) & 0xff,
+))
+stage1.write_bytes(stage1_bytes)
 
 def pad(data: bytes) -> bytes:
     return data + b"\0" * ((-len(data)) % SECTOR)
 
-prefix = stage1.read_bytes() + pad(stage2.read_bytes()) + pad(args.kernel.read_bytes())
-if len(prefix) > ACCOUNT_LBA * SECTOR:
-    raise SystemExit("kernel overlaps reserved account sectors")
+prefix = bytes(stage1_bytes) + pad(stage2.read_bytes()) + pad(args.kernel.read_bytes())
+try:
+    validate_boot_prefix(len(prefix))
+except ValueError as error:
+    raise SystemExit(str(error)) from error
 account = make_record(args.initial_password, hashlib.sha256(b"quanta-account-salt").digest()[:16])
 image = prefix + bytes(ACCOUNT_LBA * SECTOR - len(prefix))
 image += account.encode() + bytes(SECTOR)
 qfs_files = [
     ("/etc/motd", b"Welcome to QuantaOs.\n"),
     ("/etc/os-release", b"NAME=QuantaOs\nARCH=x86_64\n"),
-    ("/home/quanta/readme", b"This is your single-user QuantaOs session.\n"),
+    ("/home/quanta/Documents/readme", b"This is your single-user QuantaOs session.\n"),
+    ("/home/quanta/Desktop/.keep", b""),
+    ("/home/quanta/Documents/.keep", b""),
+    ("/home/quanta/Downloads/.keep", b""),
+    ("/home/quanta/Music/.keep", b""),
+    ("/home/quanta/Pictures/.keep", b""),
+    ("/home/quanta/Videos/.keep", b""),
+    ("/home/quanta/Trash/.keep", b""),
 ]
 for utility in sorted(pathlib.Path("build/userspace/bin").glob("*.elf")):
     qfs_files.append(("/bin/" + utility.stem, utility.read_bytes()))
@@ -95,9 +115,9 @@ directories = [
     "/usr/include/.keep", "/usr/lib/.keep", "/var/log/.keep",
 ]
 qfs_files.extend((path, b"") for path in directories)
-image += bytes(SUPERBLOCK_LBA * SECTOR - len(image)) + build_volume(
-    qfs_files, total_sectors=DISK_SIZE // SECTOR - SUPERBLOCK_LBA,
-    start_lba=SUPERBLOCK_LBA)
+image += bytes(QFS2_LBA * SECTOR - len(image)) + build_volume(
+    qfs_files, total_sectors=disk_sector_count() - QFS2_LBA,
+    start_lba=QFS2_LBA)
 args.output.parent.mkdir(parents=True, exist_ok=True)
 with args.output.open("wb") as output:
     output.write(image)

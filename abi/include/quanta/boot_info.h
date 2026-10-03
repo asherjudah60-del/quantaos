@@ -7,6 +7,10 @@
 #define QUANTA_BOOT_INFO_MAGIC 0x51424f4f54494e46ULL /* "QBOOTINF" */
 #define QUANTA_BOOT_MEMORY_USABLE 1U
 #define QUANTA_BOOT_MAX_MEMORY_REGIONS 64U
+#define QUANTA_FRAMEBUFFER_FORMAT_NONE 0U
+#define QUANTA_FRAMEBUFFER_FORMAT_BGRX8888 1U
+#define QUANTA_FRAMEBUFFER_FORMAT_BGR888 2U
+#define QUANTA_FRAMEBUFFER_FORMAT_RGBX8888 3U
 
 struct quanta_boot_memory_region {
     uint64_t physical_start;
@@ -27,7 +31,8 @@ struct quanta_boot_info {
     uint32_t framebuffer_height;
     uint32_t framebuffer_pitch;
     uint8_t framebuffer_bpp;
-    uint8_t reserved[3];
+    uint8_t framebuffer_format;
+    uint8_t reserved[2];
     uint64_t rsdp_physical;
     uint64_t storage_physical;
     uint64_t storage_sectors;

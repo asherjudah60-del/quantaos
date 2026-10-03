@@ -12,7 +12,7 @@ USER_UTILITIES := echo true false uname mkdir date pwd cat
 USER_UTILITY_OBJECTS := $(USER_UTILITIES:%=$(BUILD)/userspace/bin/%.o)
 USER_UTILITY_ELFS := $(USER_UTILITIES:%=$(BUILD)/userspace/bin/%.elf)
 
-.PHONY: all bootloader kernel uefi-loader user-binaries live-iso test-user-elf test-image-qfs test-qfs2 test-exfat test-gpt test-drivers test-user-lib check test-architecture test-host abi qemu-smoke qemu-session-smoke qemu-iso-smoke qemu-uefi-smoke qemu-run qemu-window clean
+.PHONY: all bootloader kernel uefi-loader user-binaries live-iso test-user-elf test-image-qfs test-qfs2 test-exfat test-gpt test-drivers test-user-lib check test-architecture test-host test-ipc abi qemu-smoke qemu-session-smoke qemu-iso-smoke qemu-iso-session-smoke qemu-desktop-smoke qemu-uefi-smoke bochs-desktop-smoke qemu-run qemu-window clean
 
 all: bootloader kernel
 
@@ -31,6 +31,8 @@ test-gpt:
 	$(PYTHON) tests/test_gpt.py
 test-drivers: user-binaries
 	$(PYTHON) tests/test_driver_capsule.py
+test-ipc:
+	$(PYTHON) tests/test_capability_task.py
 test-user-lib: $(BUILD)/userspace/lib.o
 
 
@@ -71,15 +73,42 @@ $(BUILD)/userspace/bin/%.elf: $(BUILD)/userspace/bin/%.o $(BUILD)/userspace/lib.
 
 $(BUILD)/kernel/core/%.o: kernel/core/%.c $(BUILD)/userspace/client.bin $(BUILD)/userspace/server.bin $(BUILD)/userspace/fault.bin
 	@mkdir -p $(dir $@)
-	$(CLANG) --target=x86_64-elf $(FREESTANDING) $(ABI_INCLUDES) -Ikernel/mm/include -Ikernel/core/include -Ikernel/vfs/include -Ikernel/arch/x86_64/include -c $< -o $@
+	$(CLANG) --target=x86_64-elf -Oz -mcmodel=kernel $(FREESTANDING) $(ABI_INCLUDES) -Ikernel/mm/include -Ikernel/core/include -Ikernel/vfs/include -Ikernel/arch/x86_64/include -c $< -o $@
 
 $(BUILD)/kernel/arch/x86_64/cpu.o: kernel/arch/x86_64/cpu.c
 	@mkdir -p $(dir $@)
-	$(CLANG) --target=x86_64-elf $(FREESTANDING) -c $< -o $@
+	$(CLANG) --target=x86_64-elf -Oz -mcmodel=kernel $(FREESTANDING) -c $< -o $@
+
+$(BUILD)/assets/default-background-palette.png: assets/quanta_desktop.png
+	@mkdir -p $(dir $@)
+	ffmpeg -v error -y -i $< -vf 'crop=1559:898:113:43,scale=512:288:flags=lanczos,palettegen=max_colors=256' -frames:v 1 $@
+
+$(BUILD)/assets/default-background.pal: assets/quanta_desktop.png $(BUILD)/assets/default-background-palette.png
+	ffmpeg -v error -y -i $< -i $(BUILD)/assets/default-background-palette.png -lavfi 'crop=1559:898:113:43,scale=512:288:flags=lanczos[scaled];[scaled][1:v]paletteuse=dither=sierra2_4a' -frames:v 1 -pix_fmt pal8 -f rawvideo $@
+
+$(BUILD)/kernel/arch/x86_64/wallpaper.o: $(BUILD)/assets/default-background.pal
+	@mkdir -p $(dir $@)
+	$(OBJCOPY) -I binary -O elf64-x86-64 --binary-architecture i386:x86-64 $< $@
+
+$(BUILD)/assets/ubuntu-mono-8x16.bin: assets/fonts/Ubuntu_Mono/UbuntuMono-Regular.ttf
+	@mkdir -p $(dir $@)
+	$(PYTHON) tools/make_font_bitmap.py $< $@
+
+$(BUILD)/kernel/arch/x86_64/font.o: $(BUILD)/assets/ubuntu-mono-8x16.bin
+	@mkdir -p $(dir $@)
+	$(OBJCOPY) -I binary -O elf64-x86-64 --binary-architecture i386:x86-64 $< $@
+
+$(BUILD)/assets/system-icons.rgba: tools/make_icon_atlas.py assets/icons/system/files-svgrepo-com.svg assets/icons/system/settings-svgrepo-com.svg assets/icons/system/terminal-svgrepo-com.svg assets/icons/system/menu-svgrepo-com.svg assets/icons/system/wifi-svgrepo-com.svg assets/icons/system/speaker-2-svgrepo-com.svg assets/icons/system/battery-full-svgrepo-com.svg assets/icons/files/word-document-svgrepo-com.svg
+	@mkdir -p $(dir $@)
+	$(PYTHON) tools/make_icon_atlas.py assets/icons $@
+
+$(BUILD)/kernel/arch/x86_64/icons.o: $(BUILD)/assets/system-icons.rgba
+	@mkdir -p $(dir $@)
+	$(OBJCOPY) -I binary -O elf64-x86-64 --binary-architecture i386:x86-64 $< $@
 
 $(BUILD)/kernel/arch/x86_64/%.o: kernel/arch/x86_64/%.c
 	@mkdir -p $(dir $@)
-	$(CLANG) --target=x86_64-elf $(FREESTANDING) $(ABI_INCLUDES) -Ikernel/arch/x86_64/include -c $< -o $@
+	$(CLANG) --target=x86_64-elf -Oz -mcmodel=kernel $(FREESTANDING) $(ABI_INCLUDES) -Ikernel/mm/include -Ikernel/arch/x86_64/include -c $< -o $@
 
 $(BUILD)/kernel/arch/x86_64/%.o: kernel/arch/x86_64/%.S $(BUILD)/userspace/client.bin $(BUILD)/userspace/server.bin $(BUILD)/userspace/fault.bin
 	@mkdir -p $(dir $@)
@@ -87,13 +116,13 @@ $(BUILD)/kernel/arch/x86_64/%.o: kernel/arch/x86_64/%.S $(BUILD)/userspace/clien
 
 $(BUILD)/kernel/mm/memory.o: kernel/mm/memory.c abi/include/quanta/boot_info.h
 	@mkdir -p $(dir $@)
-	$(CLANG) --target=x86_64-elf $(FREESTANDING) $(ABI_INCLUDES) -Ikernel/mm/include -c $< -o $@
+	$(CLANG) --target=x86_64-elf -Oz -mcmodel=kernel $(FREESTANDING) $(ABI_INCLUDES) -Ikernel/mm/include -c $< -o $@
 
 $(BUILD)/kernel/vfs/%.o: kernel/vfs/%.c
 	@mkdir -p $(dir $@)
-	$(CLANG) --target=x86_64-elf $(FREESTANDING) $(ABI_INCLUDES) -Ikernel/vfs/include -Ikernel/arch/x86_64/include -c $< -o $@
+	$(CLANG) --target=x86_64-elf -Oz -mcmodel=kernel $(FREESTANDING) $(ABI_INCLUDES) -Ikernel/core/include -Ikernel/vfs/include -Ikernel/arch/x86_64/include -c $< -o $@
 
-KERNEL_OBJECTS := $(BUILD)/kernel/core/kernel_main.o $(BUILD)/kernel/core/task.o $(BUILD)/kernel/core/account.o $(BUILD)/kernel/core/elf.o $(BUILD)/kernel/core/qfs.o $(BUILD)/kernel/core/qfs2.o $(BUILD)/kernel/mm/memory.o $(BUILD)/kernel/vfs/ramfs.o $(BUILD)/kernel/vfs/storage.o $(BUILD)/kernel/vfs/mount.o $(BUILD)/kernel/arch/x86_64/cpu.o $(BUILD)/kernel/arch/x86_64/tables.o $(BUILD)/kernel/arch/x86_64/entry.o $(BUILD)/kernel/arch/x86_64/transitions.o $(BUILD)/kernel/arch/x86_64/user_image.o
+KERNEL_OBJECTS := $(BUILD)/kernel/core/kernel_main.o $(BUILD)/kernel/core/task.o $(BUILD)/kernel/core/account.o $(BUILD)/kernel/core/elf.o $(BUILD)/kernel/core/qfs.o $(BUILD)/kernel/core/qfs2.o $(BUILD)/kernel/mm/memory.o $(BUILD)/kernel/vfs/ramfs.o $(BUILD)/kernel/vfs/storage.o $(BUILD)/kernel/vfs/mount.o $(BUILD)/kernel/arch/x86_64/cpu.o $(BUILD)/kernel/arch/x86_64/tables.o $(BUILD)/kernel/arch/x86_64/wallpaper.o $(BUILD)/kernel/arch/x86_64/font.o $(BUILD)/kernel/arch/x86_64/icons.o $(BUILD)/kernel/arch/x86_64/entry.o $(BUILD)/kernel/arch/x86_64/transitions.o $(BUILD)/kernel/arch/x86_64/user_image.o
 $(BUILD)/kernel/quanta.elf: $(KERNEL_OBJECTS) kernel/linker/kernel.ld
 	$(LLD) -m elf_x86_64 -z max-page-size=0x1000 -T kernel/linker/kernel.ld -o $@ $(filter %.o,$^)
 
@@ -133,13 +162,14 @@ test-host:
 	$(PYTHON) tests/test_elf64.py
 	$(PYTHON) tests/test_shell_utilities.py
 	$(PYTHON) tests/test_qfs2.py
+	$(PYTHON) tests/test_disk_layout.py
 
 abi:
 	@mkdir -p $(BUILD)/tests
 	$(CLANG) --target=x86_64-elf -std=c11 -Wall -Wextra -Werror $(ABI_INCLUDES) -c tests/abi_layout.c -o $(BUILD)/tests/abi_layout.o
 
 qemu-smoke: $(BUILD)/quantaos.img
-	$(PYTHON) scripts/qemu_smoke.py $< --marker QUANTA_BOOT_STAGE1_READY --marker QUANTA_BOOT_STAGE2_READY --marker QUANTA_LONG_MODE_READY --marker QUANTA_KERNEL_READY --marker QUANTA_LOGIN_READY
+	$(PYTHON) scripts/qemu_smoke.py $< --marker QUANTA_BOOT_STAGE1_READY --marker QUANTA_BOOT_STAGE2_READY --marker QUANTA_VBE_READY --marker QUANTA_LONG_MODE_READY --marker QUANTA_FRAMEBUFFER_READY --marker QUANTA_KERNEL_READY --marker QUANTA_TIMER_READY --marker QUANTA_LOGIN_READY
 
 qemu-session-smoke: $(BUILD)/quantaos.img
 	$(PYTHON) scripts/qemu_session_smoke.py $<
@@ -147,8 +177,17 @@ qemu-session-smoke: $(BUILD)/quantaos.img
 qemu-iso-smoke: $(BUILD)/quantaos.iso
 	$(PYTHON) scripts/qemu_smoke.py $< --cdrom --marker QUANTA_BOOT_STAGE1_READY --marker QUANTA_BOOT_STAGE2_READY --marker QUANTA_LONG_MODE_READY --marker QUANTA_KERNEL_READY --marker QUANTA_LOGIN_READY
 
+qemu-iso-session-smoke: $(BUILD)/quantaos.iso
+	$(PYTHON) scripts/qemu_session_smoke.py $< --cdrom
+
+qemu-desktop-smoke: $(BUILD)/quantaos.img
+	$(PYTHON) scripts/qemu_desktop_smoke.py $<
+
 qemu-uefi-smoke: $(BUILD)/quantaos.iso
 	$(PYTHON) scripts/qemu_uefi_smoke.py $<
+
+bochs-desktop-smoke: $(BUILD)/quantaos.img
+	$(PYTHON) scripts/bochs_desktop_smoke.py $<
 
 qemu-run: $(BUILD)/quantaos.img
 	qemu-system-x86_64 -drive format=raw,file=$<,if=ide,index=0,media=disk -serial stdio -display none -monitor none -no-reboot

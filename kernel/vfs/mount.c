@@ -1,4 +1,5 @@
 #include <quanta/vfs.h>
+#include <quanta/disk_layout.h>
 
 enum {
     FILESYSTEM_UNKNOWN,
@@ -21,7 +22,8 @@ uint32_t quanta_vfs_probe_boot(void) {
     uint32_t kind = FILESYSTEM_UNKNOWN;
     uint32_t qfs_read;
     for (qfs_read = 0; qfs_read < sizeof(sector); ++qfs_read) sector[qfs_read] = 0;
-    if (quanta_block_device_read(quanta_storage_boot_device(), 258, sector) == 0) {
+    if (quanta_block_device_read(quanta_storage_boot_device(), QUANTA_DISK_QFS2_LBA,
+        sector) == 0) {
         if (sector[0] == 'Q' && sector[1] == 'F' && sector[2] == 'S' &&
             sector[3] == 'v' && sector[4] == '1') kind = FILESYSTEM_QFS1;
         else if (sector[0] == 'Q' && sector[1] == 'F' && sector[2] == 'S' &&
@@ -54,6 +56,7 @@ const struct quanta_mount *quanta_vfs_boot_mount(void) {
         } else if (boot_mount.filesystem_kind == FILESYSTEM_QFS2) {
             boot_mount.provider = quanta_qfs_v2_provider();
             boot_mount.size_bytes = quanta_qfs_v2_size_bytes();
+            if (boot_mount.device->write == 0) boot_mount.flags |= QUANTA_MOUNT_READ_ONLY;
         }
     }
     return &boot_mount;

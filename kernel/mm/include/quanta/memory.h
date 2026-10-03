@@ -23,6 +23,7 @@ uint64_t quanta_frame_allocate_or_panic(void);
 uint64_t quanta_address_space_create(void);
 void quanta_map_page(uint64_t page_root, uint64_t virtual_address,
     uint64_t physical_address, uint64_t flags);
+/* Frees page-table frames only; mapped leaf frames remain caller-owned. */
 void quanta_address_space_destroy(uint64_t page_root);
 
 #endif

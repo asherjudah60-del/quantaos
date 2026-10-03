@@ -3,6 +3,15 @@ bits 16
 org 0x7c00
 %include "layout.inc"
 
+%ifdef ISO_BOOT
+    ; xorriso's boot-info table occupies bytes 8..63.  Keep executable code
+    ; outside that range; boot_image_lba at offset 12 is filled by xorriso.
+    jmp short start
+    times 12-($-$$) db 0
+boot_image_lba: dd 0
+    times 64-($-$$) db 0
+%endif
+
 start:
     cli
     xor ax, ax
@@ -15,6 +24,8 @@ start:
     mov si, stage1_ready
     call serial_puts
 %ifdef ISO_BOOT
+    mov eax, [boot_image_lba]
+    mov [0x7b00], eax
     mov dl, [boot_drive]
     jmp 0x0000:0x8000
 %endif
@@ -61,20 +72,29 @@ serial_init:
     out dx, al
     ret
 serial_puts:
+    push cx
+.next:
     lodsb
     test al, al
     jz .done
     push ax
+    mov cx, 0xffff
 .wait:
     mov dx, 0x3fd
     in al, dx
     test al, 0x20
-    jz .wait
+    jnz .ready
+    loop .wait
+    pop ax
+    jmp .next
+.ready:
     pop ax
     mov dx, 0x3f8
     out dx, al
-    jmp serial_puts
-.done: ret
+    jmp .next
+.done:
+    pop cx
+    ret
 
 boot_drive: db 0
 stage1_ready: db 'QUANTA_BOOT_STAGE1_READY', 10, 0

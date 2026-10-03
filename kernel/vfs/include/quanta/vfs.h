@@ -39,6 +39,9 @@ struct quanta_mount {
 #define QUANTA_MOUNT_BOOT (1U << 1)
 
 const struct quanta_block_device *quanta_storage_boot_device(void);
+uint32_t quanta_storage_device_count(void);
+const struct quanta_block_device *quanta_storage_device_at(uint32_t index);
+const struct quanta_block_device *quanta_storage_find_device(const char *name);
 int quanta_block_device_read(const struct quanta_block_device *device,
     uint64_t sector, void *buffer);
 int quanta_block_device_write(const struct quanta_block_device *device,

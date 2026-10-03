@@ -45,6 +45,27 @@ struct quanta_task {
 };
 static struct quanta_task tasks[QUANTA_MAX_TASKS];
 static uint64_t current;
+static struct quanta_ipc_message ipc_request;
+static struct quanta_ipc_message ipc_reply;
+static uint8_t ipc_request_payload[QUANTA_IPC_MAX_PAYLOAD];
+static uint8_t ipc_reply_payload[QUANTA_IPC_MAX_PAYLOAD];
+static uint32_t ipc_request_length;
+static uint32_t ipc_reply_length;
+static uint32_t ipc_request_pending;
+static uint32_t ipc_request_received;
+
+static void copy_bytes(void *destination, const void *source, uint64_t length) {
+    uint8_t *output = (uint8_t *)destination;
+    const uint8_t *input = (const uint8_t *)source;
+    for (uint64_t index = 0; index < length; ++index) output[index] = input[index];
+}
+
+static int ipc_message_valid(const struct quanta_ipc_message *message,
+    uint64_t length) {
+    return message->version == QUANTA_IPC_VERSION &&
+        message->payload_length == length &&
+        message->capability_count == 0U && message->flags == 0U;
+}
 
 static int has_namespace_capability(const struct quanta_task *task,
     quanta_capability_handle handle) {
@@ -53,6 +74,17 @@ static int has_namespace_capability(const struct quanta_task *task,
         const struct quanta_task_capability *capability = &task->capabilities[index];
         if (capability->handle == handle && capability->kind == QUANTA_CAP_NAMESPACE &&
             (capability->rights & QUANTA_CAP_RIGHT_SEND) != 0U) return 1;
+    }
+    return 0;
+}
+
+static int has_endpoint_capability(const struct quanta_task *task,
+    quanta_capability_handle handle, uint64_t rights) {
+    uint32_t index;
+    for (index = 0; index < task->capability_count; ++index) {
+        const struct quanta_task_capability *capability = &task->capabilities[index];
+        if (capability->handle == handle && capability->kind == QUANTA_CAP_ENDPOINT &&
+            (capability->rights & rights) == rights) return 1;
     }
     return 0;
 }
@@ -88,6 +120,28 @@ static int copy_path(const char *input, char *output) {
     return -1;
 }
 
+static int filesystem_path_valid(const struct quanta_mount *mount, const char *path) {
+    const char *drive;
+    uint32_t drive_length = 0;
+    uint32_t index;
+    char previous = 0;
+    if (mount == 0 || mount->device == 0 || path == 0) return 0;
+    drive = mount->device->name[0] == 'l' ? "live" : "prime";
+    while (drive[drive_length]) ++drive_length;
+    for (index = 0; index < drive_length; ++index) {
+        if (path[index] != drive[index]) return 0;
+    }
+    if (path[drive_length] != ':') return 0;
+    for (index = drive_length + 1U; index < QUANTA_PATH_MAX; ++index) {
+        char character = path[index];
+        if (character == 0) return 1;
+        if (character == '/' || character == '\\' || character == ':') return 0;
+        if (character == '>' && (previous == 0 || previous == '>')) return 0;
+        previous = character;
+    }
+    return 0;
+}
+
 static void copy_image(uint64_t page, const uint8_t *begin, const uint8_t *end) {
     volatile uint8_t *output = (volatile uint8_t *)(uintptr_t)page;
     while (begin != end) *output++ = *begin++;
@@ -97,6 +151,7 @@ static void create(uint64_t slot, const uint8_t *begin, const uint8_t *end, uint
     uint64_t size = (uint64_t)(end - begin);
     uint32_t page;
     task->root = quanta_address_space_create();
+    quanta_arch_write_marker("QUANTA_TASK_ADDRESS_SPACE_READY\n");
     task->code_page_count = (uint32_t)((size + 0xfffU) / 0x1000U);
     if (task->code_page_count == 0U || task->code_page_count > TASK_MAX_CODE_PAGES) for (;;) __asm__ volatile("hlt");
     for (page = 0; page < task->code_page_count; ++page) {
@@ -108,12 +163,14 @@ static void create(uint64_t slot, const uint8_t *begin, const uint8_t *end, uint
         quanta_map_page(task->root, 0x400000U + (uint64_t)page * 0x1000U,
             task->code_pages[page], QUANTA_PAGE_PRESENT | QUANTA_PAGE_WRITABLE | QUANTA_PAGE_USER);
     }
+    quanta_arch_write_marker("QUANTA_TASK_CODE_READY\n");
     task->code = task->code_pages[0]; task->stack = quanta_frame_allocate_or_panic();
     quanta_map_page(task->root, USER_STACK_BASE, task->stack,
         QUANTA_PAGE_PRESENT | QUANTA_PAGE_WRITABLE | QUANTA_PAGE_USER | QUANTA_PAGE_NO_EXECUTE);
     quanta_map_page(task->root, USER_STACK_BASE + 0x1000U,
         quanta_frame_allocate_or_panic(),
         QUANTA_PAGE_PRESENT | QUANTA_PAGE_WRITABLE | QUANTA_PAGE_USER | QUANTA_PAGE_NO_EXECUTE);
+    quanta_arch_write_marker("QUANTA_TASK_STACK_READY\n");
     quanta_map_page(task->root, 0xb8000, 0xb8000,
         QUANTA_PAGE_PRESENT | QUANTA_PAGE_WRITABLE | QUANTA_PAGE_USER);
     if (quanta_arch_storage_physical() != 0U) {
@@ -124,6 +181,7 @@ static void create(uint64_t slot, const uint8_t *begin, const uint8_t *end, uint
                 QUANTA_PAGE_PRESENT | QUANTA_PAGE_USER | QUANTA_PAGE_NO_EXECUTE);
         }
     }
+    quanta_arch_write_marker("QUANTA_TASK_STORAGE_READY\n");
     task->ip = 0x400000; task->sp = USER_STACK_END - 8U; task->state = TASK_RUNNABLE; task->endpoint = cap;
     if (slot == 0U) {
         quanta_capability_handle namespace_handle;
@@ -141,6 +199,8 @@ void quanta_task_bootstrap(void) {
     create(1, __user_server_start, __user_server_end, 2);
     create(2, __user_fault_start, __user_fault_end, 0);
     quanta_arch_configure_syscalls();
+    while (quanta_arch_timer_ticks() == 0U) __asm__ volatile("hlt");
+    quanta_arch_write_marker("QUANTA_TIMER_READY\n");
     quanta_arch_write_marker("QUANTA_USER_SESSION_STARTING\n");
     run(0);
 }
@@ -152,7 +212,6 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
     const struct quanta_mount *mount;
     uint64_t index;
     long read_result;
-    (void)message;
     (void)return_ip;
     (void)flags;
     if (number == QUANTA_SYSCALL_RTC_READ) quanta_arch_write_marker("QUANTA_RTC_ENTER\n");
@@ -175,10 +234,33 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
         quanta_arch_console_clear();
         return QUANTA_STATUS_OK;
     }
+    if (current == 0 && has_namespace_capability(task, handle) &&
+        number == QUANTA_SYSCALL_DESKTOP_DRAW) {
+        uint64_t command_bytes;
+        if (length == 0U || length > QUANTA_DESKTOP_DRAW_MAX_COMMANDS ||
+            length > ~0ULL / sizeof(struct quanta_desktop_draw_command)) return QUANTA_STATUS_INVALID;
+        command_bytes = length * sizeof(struct quanta_desktop_draw_command);
+        if (!user_range_valid(task, message, command_bytes, 0)) return QUANTA_STATUS_INVALID;
+        return quanta_arch_desktop_draw((const void *)(uintptr_t)message,
+            (uint32_t)length) == 0 ? QUANTA_STATUS_OK : QUANTA_STATUS_INVALID;
+    }
+    if (current == 0 && has_namespace_capability(task, handle) &&
+        number == QUANTA_SYSCALL_DESKTOP_VIEW) {
+        if (message > QUANTA_DESKTOP_VIEW_TERMINAL) return QUANTA_STATUS_INVALID;
+        return quanta_arch_desktop_view((uint32_t)message) == 0 ?
+            QUANTA_STATUS_OK : QUANTA_STATUS_STATE;
+    }
+    if (current == 0 && has_namespace_capability(task, handle) &&
+        number == QUANTA_SYSCALL_DESKTOP_PRESENT) {
+        return quanta_arch_desktop_present() == 0 ?
+            QUANTA_STATUS_OK : QUANTA_STATUS_STATE;
+    }
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_FS_READ) {
         if (payload == 0U || length == 0U || length > QUANTA_SYSCALL_MAX_BUFFER) return QUANTA_STATUS_INVALID;
         if (!user_range_valid(task, message, QUANTA_PATH_MAX, 0) ||
+            !filesystem_path_valid(mount, (const char *)(uintptr_t)message) ||
             !user_range_valid(task, payload, length, 1)) return QUANTA_STATUS_INVALID;
+        if (mount->provider == 0) return QUANTA_STATUS_STATE;
         read_result = mount->provider->read((const char *)(uintptr_t)message,
             (char *)(uintptr_t)payload, (uint32_t)length);
         if (read_result >= 0) return read_result;
@@ -194,6 +276,7 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
         const char *path = (const char *)(uintptr_t)message;
         if (result == NULL ||
             !user_range_valid(task, message, QUANTA_PATH_MAX, 0) ||
+            !filesystem_path_valid(mount, path) || mount->provider == 0 ||
             !user_range_valid(task, payload, sizeof(*result), 1) ||
             (length & ~(QUANTA_OPEN_READ | QUANTA_OPEN_WRITE | QUANTA_OPEN_CREATE |
                 QUANTA_OPEN_TRUNCATE | QUANTA_OPEN_DIRECTORY)) != 0U) {
@@ -255,6 +338,8 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_FS_LIST) {
         if (payload == 0U || length == 0U || length > QUANTA_SYSCALL_MAX_BUFFER) return QUANTA_STATUS_INVALID;
         if (!user_range_valid(task, message, QUANTA_PATH_MAX, 0) ||
+            !filesystem_path_valid(mount, (const char *)(uintptr_t)message) ||
+            mount->provider == 0 ||
             !user_range_valid(task, payload, length, 1)) return QUANTA_STATUS_INVALID;
         read_result = mount->provider->list((const char *)(uintptr_t)message,
             (char *)(uintptr_t)payload, (uint32_t)length);
@@ -269,13 +354,16 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
         struct quanta_file_stat *stat = (struct quanta_file_stat *)(uintptr_t)payload;
         if (stat == 0 || length < sizeof(*stat) ||
             !user_range_valid(task, message, QUANTA_PATH_MAX, 0) ||
+            !filesystem_path_valid(mount, (const char *)(uintptr_t)message) ||
+            mount->provider == 0 ||
             !user_range_valid(task, payload, sizeof(*stat), 1)) return QUANTA_STATUS_INVALID;
         return mount->provider->stat((const char *)(uintptr_t)message, stat) == 0
             ? QUANTA_STATUS_OK : QUANTA_STATUS_INVALID;
     }
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_FS_MKDIR) {
         if ((mount->flags & QUANTA_MOUNT_READ_ONLY) != 0U ||
-            !user_range_valid(task, message, QUANTA_PATH_MAX, 0)) return QUANTA_STATUS_DENIED;
+            !user_range_valid(task, message, QUANTA_PATH_MAX, 0) ||
+            !filesystem_path_valid(mount, (const char *)(uintptr_t)message)) return QUANTA_STATUS_DENIED;
         if (mount->filesystem_kind != QUANTA_FILESYSTEM_QFS2) return QUANTA_STATUS_STATE;
         if (quanta_qfs2_mkdir((const char *)(uintptr_t)message) != 0) {
             quanta_arch_write_marker("QUANTA_MKDIR_FAILED\n");
@@ -334,12 +422,40 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
     }
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_SYSTEM_INFO) {
         struct quanta_system_info *info = (struct quanta_system_info *)(uintptr_t)payload;
+        uint32_t display_width, display_height;
         mount = quanta_vfs_boot_mount();
         if (length < sizeof(*info) || !user_range_valid(task, payload, sizeof(*info), 1)) return QUANTA_STATUS_INVALID;
         info->mount_size_bytes = mount->size_bytes;
         info->mount_read_only = (mount->flags & QUANTA_MOUNT_READ_ONLY) != 0U;
         info->filesystem_kind = mount->filesystem_kind;
+        quanta_arch_display_dimensions(&display_width, &display_height);
+        info->display_width = display_width;
+        info->display_height = display_height;
         return QUANTA_STATUS_OK;
+    }
+    if (current == 0 && has_namespace_capability(task, handle) &&
+        number == QUANTA_SYSCALL_STORAGE_LIST) {
+        uint64_t capacity = length / sizeof(struct quanta_storage_info);
+        uint64_t count = quanta_storage_device_count();
+        struct quanta_storage_info *output = (struct quanta_storage_info *)(uintptr_t)payload;
+        if (payload == 0U || length < sizeof(*output) ||
+            !user_range_valid(task, payload, length, 1)) return QUANTA_STATUS_INVALID;
+        if (capacity > count) capacity = count;
+        for (uint64_t item = 0; item < capacity; ++item) {
+            const struct quanta_block_device *device = quanta_storage_device_at((uint32_t)item);
+            uint32_t character = 0;
+            if (device == 0) return QUANTA_STATUS_STATE;
+            while (character + 1U < sizeof(output[item].name) && device->name[character]) {
+                output[item].name[character] = device->name[character];
+                ++character;
+            }
+            output[item].name[character] = 0;
+            output[item].flags = device == quanta_storage_boot_device() &&
+                device->name[0] == 'l' ? QUANTA_STORAGE_LIVE | QUANTA_STORAGE_READ_ONLY :
+                (device->write == 0 ? QUANTA_STORAGE_READ_ONLY : 0U);
+            output[item].sector_count = device->sector_count;
+        }
+        return (long)capacity;
     }
     if (current == 0 && has_namespace_capability(task, handle) && number == QUANTA_SYSCALL_SESSION_LOGOUT) {
         task->authenticated = 0U;
@@ -347,16 +463,54 @@ long quanta_task_syscall(uint64_t number, uint64_t handle, uint64_t message,
         return QUANTA_STATUS_OK;
     }
     if (number == QUANTA_SYSCALL_IPC_CALL) {
-        if (current != 0 || handle != task->endpoint) return QUANTA_STATUS_DENIED;
+        struct quanta_ipc_message request;
+        if (current != 0 || handle != task->endpoint ||
+            !has_endpoint_capability(task, handle, QUANTA_CAP_RIGHT_SEND)) return QUANTA_STATUS_DENIED;
+        if (ipc_request_pending != 0U || !user_range_valid(task, message, sizeof(request), 0) ||
+            (length != 0U && !user_range_valid(task, payload, length, 0))) return QUANTA_STATUS_INVALID;
+        copy_bytes(&request, (const void *)(uintptr_t)message, sizeof(request));
+        if (!ipc_message_valid(&request, length)) return QUANTA_STATUS_INVALID;
+        ipc_request = request;
+        ipc_request_length = (uint32_t)length;
+        if (length != 0U) copy_bytes(ipc_request_payload, (const void *)(uintptr_t)payload, length);
+        ipc_request_pending = 1U;
+        ipc_request_received = 0U;
+        ipc_reply_length = 0U;
         task->return_ip = return_ip; task->return_flags = flags; task->state = TASK_WAIT_REPLY;
         run(1);
     }
     if (number == QUANTA_SYSCALL_IPC_RECEIVE) {
-        if (current != 1 || handle != task->endpoint || tasks[0].state != TASK_WAIT_REPLY) return QUANTA_STATUS_STATE;
+        if (current != 1 || handle != task->endpoint ||
+            !has_endpoint_capability(task, handle, QUANTA_CAP_RIGHT_RECEIVE) ||
+            tasks[0].state != TASK_WAIT_REPLY || ipc_request_pending == 0U ||
+            ipc_request_received != 0U) return QUANTA_STATUS_STATE;
+        if (length < ipc_request_length || length > QUANTA_IPC_MAX_PAYLOAD ||
+            !user_range_valid(task, message, sizeof(ipc_request), 1) ||
+            (ipc_request_length != 0U && !user_range_valid(task, payload, ipc_request_length, 1))) {
+            return QUANTA_STATUS_INVALID;
+        }
+        copy_bytes((void *)(uintptr_t)message, &ipc_request, sizeof(ipc_request));
+        if (ipc_request_length != 0U) {
+            copy_bytes((void *)(uintptr_t)payload, ipc_request_payload, ipc_request_length);
+        }
+        ipc_request_received = 1U;
         quanta_arch_write_marker("QUANTA_IPC_SERVER_RECEIVED\n"); return QUANTA_STATUS_OK;
     }
     if (number == QUANTA_SYSCALL_IPC_REPLY) {
-        if (current != 1 || handle != task->endpoint || tasks[0].state != TASK_WAIT_REPLY) return QUANTA_STATUS_STATE;
+        struct quanta_ipc_message response;
+        if (current != 1 || handle != task->endpoint ||
+            !has_endpoint_capability(task, handle, QUANTA_CAP_RIGHT_SEND) ||
+            tasks[0].state != TASK_WAIT_REPLY || ipc_request_pending == 0U ||
+            ipc_request_received == 0U) return QUANTA_STATUS_STATE;
+        if (!user_range_valid(task, message, sizeof(response), 0) ||
+            (length != 0U && !user_range_valid(task, payload, length, 0))) return QUANTA_STATUS_INVALID;
+        copy_bytes(&response, (const void *)(uintptr_t)message, sizeof(response));
+        if (!ipc_message_valid(&response, length) || response.service != ipc_request.service ||
+            response.correlation_id != ipc_request.correlation_id) return QUANTA_STATUS_INVALID;
+        ipc_reply = response;
+        ipc_reply_length = (uint32_t)length;
+        if (length != 0U) copy_bytes(ipc_reply_payload, (const void *)(uintptr_t)payload, length);
+        ipc_request_pending = 0U;
         tasks[0].ip = tasks[0].return_ip; tasks[0].state = TASK_DONE;
         quanta_arch_write_marker("QUANTA_IPC_ROUNDTRIP_READY\n");
         quanta_arch_write_marker("QUANTA_FAULT_TASK_STARTED\n"); run(2);

@@ -24,10 +24,10 @@ try:
         process = subprocess.Popen(command, text=True, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         time.sleep(1)
-        output, _ = process.communicate(input="quanta\nquanta\n", timeout=5)
+        output, _ = process.communicate(input="quanta\nquanta\n", timeout=30)
     else:
         run = subprocess.run(command, text=True, input="quanta\nquanta\n",
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5)
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
         output = run.stdout
 except subprocess.TimeoutExpired as error:
     output = error.stdout or ""

@@ -18,7 +18,7 @@ SUPER = struct.Struct("<8sHHIIIIIIIII")
 INODE = struct.Struct("<QIIIIIIQQII")
 DENTRY = struct.Struct("<QQBB48s")
 
-SUPERBLOCK_LBA = 258
+SUPERBLOCK_LBA = 514
 DEFAULT_VOLUME_SECTORS = (10 * 1024 * 1024 * 1024 // SECTOR) - SUPERBLOCK_LBA
 
 @dataclass(frozen=True)
@@ -56,7 +56,7 @@ def _checksum(data: bytes) -> int:
     return zlib.crc32(data) & 0xffffffff
 
 def build_metadata(inodes: list[Inode], entries: list[DirectoryEntry],
-                   total_sectors: int, bitmap_lba: int = 259,
+                   total_sectors: int, bitmap_lba: int = SUPERBLOCK_LBA + 1,
                    inode_reserve_sectors: int = 0, entry_reserve_sectors: int = 0) -> bytes:
     if not any(item.inode == ROOT_INODE and item.kind == TYPE_DIRECTORY for item in inodes):
         raise ValueError("QFS root inode is required")
@@ -91,7 +91,7 @@ def validate_metadata(data: bytes) -> None:
         raise ValueError("invalid QFS v2 superblock")
     if checksum != _checksum(data[:40]):
         raise ValueError("invalid QFS v2 checksum")
-    if total == 0 or bitmap_lba < 259 or inode_lba <= bitmap_lba or entry_lba < inode_lba:
+    if total == 0 or bitmap_lba < SUPERBLOCK_LBA + 1 or inode_lba <= bitmap_lba or entry_lba < inode_lba:
         raise ValueError("invalid QFS v2 metadata regions")
     end = (entry_lba + entry_sectors) * SECTOR
     if end > total * SECTOR or inode_sectors == 0:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a BIOS El Torito ISO whose boot image contains the complete kernel payload."""
+"""Build a BIOS/UEFI ISO with a small El Torito loader and aligned payload."""
 from __future__ import annotations
 
 import argparse
@@ -33,6 +33,7 @@ kernel_bytes = args.kernel.read_bytes()
 kernel_sectors = math.ceil(len(kernel_bytes) / SECTOR)
 storage_bytes = args.storage.read_bytes()
 storage_sectors = math.ceil(len(storage_bytes) / SECTOR)
+ISO_BLOCK = 2048
 
 def write_layout(stage2_sectors: int) -> None:
     layout.write_text(
@@ -42,7 +43,10 @@ def write_layout(stage2_sectors: int) -> None:
         "%define KERNEL_LBA 0\n"
         f"%define KERNEL_SECTORS {kernel_sectors}\n"
         f"%define KERNEL_BYTES {len(kernel_bytes)}\n"
-        f"%define STORAGE_SECTORS {storage_sectors}\n")
+        f"%define STORAGE_SECTORS {storage_sectors}\n"
+        "%define ISO_LOADER_BLOCKS 0\n"
+        f"%define ISO_KERNEL_BLOCKS {math.ceil(len(kernel_bytes) / ISO_BLOCK)}\n"
+        f"%define ISO_STORAGE_BLOCKS {math.ceil(len(storage_bytes) / ISO_BLOCK)}\n")
 
 def assemble(source: pathlib.Path, output: pathlib.Path) -> None:
     subprocess.run([
@@ -62,12 +66,24 @@ assemble(args.stage1, stage1)
 if stage1.stat().st_size != SECTOR or stage1.read_bytes()[-2:] != b"\x55\xaa":
     raise SystemExit("ISO stage 1 is not a bootable 512-byte image")
 
-def pad(data: bytes) -> bytes:
-    return data + bytes((-len(data)) % SECTOR)
+def pad(data: bytes, alignment: int = SECTOR) -> bytes:
+    return data + bytes((-len(data)) % alignment)
 
-boot_image.write_bytes(pad(stage1.read_bytes()) + bytes(SECTOR) +
-                      pad(stage2.read_bytes()) + pad(kernel_bytes) + pad(storage_bytes))
-boot_sectors = boot_image.stat().st_size // SECTOR
+loader = pad(stage1.read_bytes()) + bytes(SECTOR) + pad(stage2.read_bytes())
+loader = pad(loader, ISO_BLOCK)
+loader_blocks = len(loader) // ISO_BLOCK
+write_layout(stage2_sectors)
+layout.write_text(layout.read_text().replace("%define ISO_LOADER_BLOCKS 0\n",
+    f"%define ISO_LOADER_BLOCKS {loader_blocks}\n"))
+assemble(args.stage2, stage2)
+loader = pad(stage1.read_bytes()) + bytes(SECTOR) + pad(stage2.read_bytes())
+loader = pad(loader, ISO_BLOCK)
+loader_blocks = len(loader) // ISO_BLOCK
+boot_image.write_bytes(loader + pad(kernel_bytes, ISO_BLOCK) +
+                      pad(storage_bytes, ISO_BLOCK))
+boot_sectors = len(loader) // SECTOR
+if boot_sectors > 127:
+    raise SystemExit("El Torito loader exceeds BIOS 127-sector boot-load limit")
 iso_dir = args.build / "iso-root"
 if iso_dir.exists():
     shutil.rmtree(iso_dir)
@@ -88,8 +104,8 @@ args.output.parent.mkdir(parents=True, exist_ok=True)
 subprocess.run([
     args.xorriso, "-as", "mkisofs", "-iso-level", "3", "-V", "QUANTAOS",
     "-appended_part_as_gpt", "-append_partition", "3", "0x83", str(args.storage),
-    "-b", "boot.img", "-no-emul-boot", "-boot-load-size", str(boot_sectors),
+    "-b", "boot.img", "-no-emul-boot", "-boot-info-table", "-boot-load-size", str(boot_sectors),
     "-efi-boot-part", str(efi_image), "--efi-boot", "efi.img",
     "-o", str(args.output), str(iso_dir)
 ], check=True, stdout=subprocess.DEVNULL)
-print(f"created {args.output}: El Torito boot image={boot_sectors} sectors")
+print(f"created {args.output}: El Torito loader={boot_sectors} sectors payload={boot_image.stat().st_size // SECTOR} sectors")

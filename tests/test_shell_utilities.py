@@ -19,5 +19,7 @@ assert 'QUANTA_SYSCALL_SESSION_LOGOUT' in text, 'exit must use the logout syscal
 assert 'equal(name, "shutdown")' in text, 'shutdown must remain a separate command'
 assert 'equal(line, "exit") || equal(line, "shutdown")' not in text, 'exit must not power off'
 assert 'split_command' in text, 'commands must parse a name and arguments'
-assert 'C:' in text and 'path_resolve' in text, 'drive-letter paths must resolve to the system root'
+assert '"prime"' in text and '"live"' in text and 'path_resolve' in text, 'named drive paths must resolve to the selected root'
+assert 'C:/' not in text and '/dev/disk0' not in text, 'UNIX and drive-letter mount syntax must not be user-visible'
+assert 'HOME=/home/' not in text and 'SHELL=/bin/' not in text and '"/dev/console' not in text, 'shell environment must use named-drive paths'
 print('shell utility checks passed')
